@@ -1,0 +1,12 @@
+node_modules/
+dist/
+# SQLite runs in WAL mode, which keeps two sidecar files next to the database.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.DS_Store
+
+# Cover art is fetched, not authored — regenerate with `npm run covers`
+server/covers/

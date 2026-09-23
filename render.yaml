@@ -1,0 +1,18 @@
+# Render blueprint — https://render.com/docs/blueprint-spec
+# Deploy: push this repo to GitHub, then New > Blueprint in the Render dashboard.
+services:
+  - type: web
+    name: shelf
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # `free` works too, but free instances have no disk
+    healthCheckPath: /api/health
+    envVars:
+      - key: SHELF_SECRET
+        generateValue: true   # Render generates and stores a random secret
+      - key: SHELF_DATA_DIR
+        value: /data
+    disk:
+      name: shelf-data
+      mountPath: /data       # keeps the database across deploys
+      sizeGB: 1

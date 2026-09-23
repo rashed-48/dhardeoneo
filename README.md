@@ -1,0 +1,244 @@
+# Shelf
+
+A peer-to-peer book lending marketplace. People list books they own with a **price per day**,
+and borrowers nearby find them, **compare on price, rating and distance**, request the book
+for a set number of days, pay once the lender accepts, collect it in person, return it, and
+leave a review.
+
+## Run it
+
+```bash
+npm run setup    # installs everything, seeds the demo data, downloads cover art
+npm run dev      # API on :4000, web on :5173
+```
+
+Then open <http://localhost:5173>.
+
+Demo account: **ayesha@shelf.app** / **password123** (the login screen has a
+"Use a demo account" button). Every seeded lender uses the same password. Ayesha has a rental
+waiting to be paid for, so the checkout screen is one click away.
+
+Other scripts: `npm run seed` resets the demo data, `npm run covers` fills in missing cover
+art (`-- --all` re-fetches everything), `npm run build` builds the frontend, and
+`npm run dev:api` / `npm run dev:web` run one side only.
+
+## How the product works
+
+**Borrower**
+1. Sets a location — current GPS position or an area from the picker. Every distance in the
+   app is measured from that point.
+2. Searches and filters: text, category, max price per day, minimum rating, max distance,
+   available-now. Sorts by best match, price, rating, distance or newest.
+3. Picks a start date and a number of days. The full bill — daily rate × days, service fee,
+   refundable deposit — is shown before anything is sent. Nothing is charged yet.
+4. When the lender accepts, pays by card to confirm the dates.
+5. Collects, reads, returns, reviews.
+
+**Lender**
+1. Lists a book, setting the daily rate, deposit, and the minimum and maximum lending period.
+2. Gets the request and accepts or declines it. Accepting one request auto-declines others
+   that overlap the same dates.
+3. Once the borrower has paid, marks the book handed over, then returned.
+4. The rent lands as a payout; the deposit goes back to the borrower automatically.
+
+**Privacy.** Phone numbers are stripped from API responses until the lender accepts. Only the
+area and the distance are ever public — never a street address.
+
+**Reviews.** Only the borrower on a rental that reached `returned` can review it, and only
+once. That means every rating on the site comes from a completed loan.
+
+### Ranking
+
+`sort=best` blends the three things borrowers actually compare, so a cheap, well-reviewed
+book ten minutes away beats an expensive unrated one across the city:
+
+```
+0.40 × rating  +  0.25 × price decay  +  0.25 × proximity  +  0.10 × review volume
+```
+
+Unrated books are scored at 3.8/5 rather than 0, so new listings are not buried.
+See `score()` in [server/src/routes/listings.js](server/src/routes/listings.js).
+
+## Payments
+
+Money is modelled as an append-only ledger. Rentals never store a balance — every figure the
+UI shows (paid, refunded, paid out) is derived from the `payments` table, so the numbers
+cannot drift from what actually happened.
+
+| When | Row written | Who |
+|---|---|---|
+| Borrower pays an accepted rental | `rental` — rent + fee + deposit | borrower → platform |
+| Book is returned | `deposit_refund` | platform → borrower |
+| Book is returned | `payout` — the rent | platform → lender |
+| Paid rental is cancelled | `cancellation_refund` — everything | platform → borrower |
+
+The platform keeps the service fee. Failed attempts are written to the ledger too, so a
+declined card leaves a trail without touching the rental's state.
+
+Rules the server enforces: only the borrower can pay, only for a rental the lender has
+accepted, only once, and the lender **cannot mark a book handed over until it is paid for**.
+
+### The gateway is simulated
+
+There are no payment-provider credentials in this project, so
+[server/src/lib/payments.js](server/src/lib/payments.js) is a stand-in: **no real money moves.**
+It is not a stub, though — it runs the Luhn checksum, validates expiry and CVC length by card
+brand, and returns the same `{ ok, reference, brand, last4, failureReason }` shape a real
+provider would, so every branch above is exercised. Test cards:
+
+| Number | Result |
+|---|---|
+| `4242 4242 4242 4242` | succeeds |
+| `4000 0000 0000 0002` | declined by issuer |
+| `4000 0000 0009 0003` | insufficient funds |
+
+Card numbers are passed straight to the gateway and never persisted — only the brand and last
+four digits are stored. To go live, swap `charge`/`refund`/`payout` for a real PSP (Stripe,
+SSLCOMMERZ, bKash) and keep the return shape; nothing above that file changes. A production
+integration would also tokenise the card in the browser so the PAN never reaches this server.
+
+## Cover art
+
+`npm run covers` fetches real jackets from [Open Library](https://openlibrary.org) and stores
+them in `server/covers/`, served from our own `/covers` route — the app never hotlinks
+someone else's bandwidth and works offline afterwards. All 34 seeded books have real covers
+(~1.5 MB total). The files are gitignored because they are fetched, not authored.
+
+Two details that took a second pass: the search prefers an edition in the **listing's own
+language**, otherwise an English title can come back as the French edition; and Bangla titles
+need a transliterated search term, since Open Library is catalogued in Latin script
+(`SEARCH_ALIASES` in [server/src/lib/openlibrary.js](server/src/lib/openlibrary.js)).
+
+When a lender adds their own book, **Find the real cover** on the lend form looks it up and
+caches it the same way. Anything with no match falls back to `BookCover`, which hashes the
+title into one of five monochrome layouts — so a book without art still looks designed rather
+than broken.
+
+## Deploying
+
+The whole thing runs as **one container on one port**: Express serves the API, the cover
+images and the built SPA together, so there is no CORS setup, no second service and no
+separate static host.
+
+```bash
+npm run preview     # build + run exactly as production does, on http://localhost:4000
+```
+
+### First deploy
+
+```bash
+git add -A && git commit -m "Shelf"
+git remote add origin git@github.com:<you>/shelf.git && git push -u origin main
+```
+
+Then, on either host:
+
+**Render** — New > Blueprint, point it at the repo. [`render.yaml`](render.yaml) already
+declares the Docker build, the health check, a 1 GB disk at `/data`, and a generated
+`SHELF_SECRET`. Nothing else to fill in.
+
+**Fly.io** —
+
+```bash
+fly launch --no-deploy            # reads fly.toml; pick your region
+fly volumes create shelf_data --size 1
+fly secrets set SHELF_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+fly deploy
+```
+
+Any other Docker host (Railway, Koyeb, a VPS) works the same way — build the
+[`Dockerfile`](Dockerfile), give it a `SHELF_SECRET`, and mount a volume at `/data`.
+
+### What the container does on boot
+
+1. Copies bundled cover art onto the data volume if one is mounted.
+2. **Seeds itself if the database is empty**, so a brand-new deploy comes up with all 34
+   books rather than a blank page.
+3. Links any listing that has a cover file but no record of it.
+
+That means the app is correct with *or without* a persistent disk. With a volume, data
+survives redeploys. Without one (Render's free tier has no disk), it simply resets to the
+demo data on restart — fine for showing the thing off, not for real users.
+
+### Environment
+
+| Variable | Needed | Meaning |
+|---|---|---|
+| `SHELF_SECRET` | **production** | Signs session tokens. 16+ chars; 32 random bytes is right. |
+| `PORT` | no | Injected by most hosts. Defaults to 4000. |
+| `SHELF_DATA_DIR` | no | Where the database lives. Set to your volume mount, e.g. `/data`. |
+| `SHELF_COVERS_DIR` | no | Point at the volume to keep lender-fetched covers across deploys. |
+| `SHELF_DB`, `SHELF_WEB_DIST` | no | Direct path overrides. |
+
+Copy [.env.example](.env.example) to `.env` for local overrides.
+
+**If `SHELF_SECRET` is unset in production the app still boots**, but generates a random
+secret per process and warns — so nobody can forge a token with a known default, at the cost
+of logging everyone out on restart. Set it properly.
+
+### Production hardening already in place
+
+Helmet security headers with a CSP tuned for the app's own assets and Google Fonts, gzip
+compression (the listings payload drops 19 kB → 4 kB), `trust proxy` for hosts that
+terminate TLS upstream, immutable caching on hashed assets with `no-cache` on `index.html`,
+SPA history fallback that does not swallow `/api` or `/covers` 404s, and a
+`/api/health` endpoint wired to both the Docker healthcheck and the platform configs.
+
+Requires **Node 24+** — `node:sqlite` needs `--experimental-sqlite` before then, which is
+why the image is pinned to `node:24-slim`.
+
+## Stack
+
+| | |
+|---|---|
+| Backend | Node + Express, SQLite via the built-in `node:sqlite` — no native module to compile |
+| Auth | JWT, passwords hashed with `scrypt` from `node:crypto` |
+| Frontend | React 19 + Vite + React Router, Tailwind v4 |
+| Distance | Haversine from the borrower's chosen origin, computed per request |
+
+Three dependencies on the server (`express`, `cors`, `jsonwebtoken`). The database is a single
+file, `server/shelf.db`, created on first run and migrated forward on boot.
+
+## Layout
+
+```
+server/src/
+  index.js              Express app, route mounting, /covers static
+  db.js                 schema, migrations, connection
+  seed.js               10 lenders, 34 books, ~70 rentals, 54 reviews, full ledger
+  covers.js             `npm run covers` — bulk cover fetch
+  lib/geo.js            haversine, known areas, categories
+  lib/auth.js           hashing, JWT, requireAuth
+  lib/payments.js       the simulated card gateway
+  lib/openlibrary.js    cover search + download
+  routes/auth.js        signup, login, me
+  routes/listings.js    search, filtering, ranking, listing CRUD, cover lookup
+  routes/rentals.js     request -> accept -> pay -> handover -> return, refunds, reviews
+
+web/src/
+  store/AppContext.jsx      session + the location everything is measured from
+  lib/api.js                fetch wrapper, token handling
+  components/BookCover.jsx  real jacket, or generated art as a fallback
+  components/CheckoutSheet.jsx  card entry and the bill
+  pages/                    Home, Browse, BookDetail, Auth, ListBook, Dashboard
+```
+
+## Design
+
+Black, white and one grey ramp, in the style of Uber's app: tight headline tracking, 48px
+controls, 12px radii, filled-grey inputs that invert to a black outline on focus, full-width
+black primary buttons, bottom sheets on mobile that become centred dialogs on desktop. The
+chrome stays strictly monochrome and the covers supply all the colour — the same split Uber
+Eats uses between its UI and its photography.
+
+## Notes and assumptions
+
+- **Locations are Dhaka areas and prices are in taka (৳).** Both are one-line changes:
+  `AREAS` in [server/src/lib/geo.js](server/src/lib/geo.js) and `CURRENCY` in
+  [web/src/lib/format.js](web/src/lib/format.js).
+- **Service fee** is 5% of the rental subtotal with a ৳5 floor — `quote()` in
+  [server/src/routes/rentals.js](server/src/routes/rentals.js), mirrored client-side so the
+  borrower sees the same number before submitting.
+- **Deposits are held by the platform** in the ledger and released on return. Damage claims
+  (withholding part of a deposit) are not modelled.
+- The JWT secret defaults to a development value; set `SHELF_SECRET` before deploying.

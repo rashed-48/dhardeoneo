@@ -1,0 +1,33 @@
+# Fly.io — https://fly.io/docs/reference/configuration/
+# Deploy: fly launch --no-deploy && fly volumes create shelf_data --size 1 && fly deploy
+app = "shelf"
+primary_region = "sin"   # Singapore is the closest region to Dhaka
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "4000"
+  SHELF_DATA_DIR = "/data"
+
+[[mounts]]
+  source = "shelf_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/api/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
