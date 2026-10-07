@@ -20,11 +20,11 @@ const PORT = Number(process.env.PORT || 4000);
 
 // A fresh host starts with an empty volume; without this the site would come
 // up with no books at all.
-function seedIfEmpty() {
+async function seedIfEmpty() {
   const { n } = db.prepare('SELECT COUNT(*) AS n FROM users').get();
   if (n > 0) return;
   console.log('[shelf] Empty database — seeding demo data.');
-  seed();
+  await seed();
 }
 
 /**
@@ -67,7 +67,7 @@ function reattachCovers() {
 
 // Order matters: covers must be in place before the seed looks for them.
 hydrateCovers();
-seedIfEmpty();
+await seedIfEmpty();
 reattachCovers();
 
 // Hosts terminate TLS upstream, so trust their forwarding headers.

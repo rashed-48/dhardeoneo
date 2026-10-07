@@ -32,8 +32,8 @@ npm run test:all      # both
 ```
 
 `npm test` runs two files. [`core.test.js`](server/test/core.test.js) unit-tests the pure
-rules — the payment simulator, quote arithmetic, calendar dates, distance, and the
-session-refresh decision. [`api.test.js`](server/test/api.test.js) boots the real server in a
+rules — the payment simulator, quote arithmetic, calendar dates, distance, password
+hashing, and the session-refresh decision. [`api.test.js`](server/test/api.test.js) boots the real server in a
 child process against a throwaway database on a spare port and exercises the HTTP API, so it
 needs no running server and never touches development data.
 
@@ -51,6 +51,18 @@ succeeds, that a lapsed session redirects to login with an explanation and retur
 page you wanted, and that neither signed-out browsing nor a wrong password is mistaken for an
 expiry. It skips with a message if Chrome is not installed (`CHROME_PATH` overrides the
 lookup), and removes its profile directory afterwards.
+
+Passwords are hashed with scrypt on libuv's thread pool, never with the synchronous form.
+That matters more than it sounds: scrypt is deliberately slow, so hashing on the event loop
+freezes the whole server for its duration. Measured with eight concurrent sign-ins, an
+unrelated `/api/health` request took **630 ms** synchronously versus **2.6 ms** asynchronously,
+and the sign-ins themselves finished in 205 ms rather than 664 ms. A test asserts both
+functions stay thenable so a revert to `scryptSync` fails loudly instead of quietly costing
+throughput.
+
+Login also hashes against a dummy value when the email is unknown, so a missing account costs
+the same work as a wrong password and response time cannot be used to enumerate registered
+emails.
 
 Not yet present: linting and type checking.
 

@@ -34,7 +34,8 @@ test('distance is zero at the same location and null without an origin', () => {
   assert.equal(distanceKm({ lat: 23.7, lng: 90.4 }, { lat: 23.7, lng: 90.4 }), 0);
 });
 
-const { shouldRefresh, SESSION_LIMITS } = await import('../src/lib/auth.js');
+const { shouldRefresh, SESSION_LIMITS, hashPassword, verifyPassword } =
+  await import('../src/lib/auth.js');
 const { idleWindowMs, absoluteMaxMs, refreshAfterMs } = SESSION_LIMITS;
 
 test('a fresh session is not reissued on every request', () => {
@@ -57,4 +58,38 @@ test('sliding stops at the absolute cap and after it has lapsed', () => {
   assert.equal(shouldRefresh({ startedAt: old, expiresAt: now + 60_000 }, now), false);
   // Already expired: nothing to extend.
   assert.equal(shouldRefresh({ startedAt: now, expiresAt: now - 1 }, now), false);
+});
+
+test('password hashing round-trips and rejects a wrong password', async () => {
+  const stored = await hashPassword('correct horse battery staple');
+  const [salt, hash] = stored.split(':');
+  assert.equal(salt.length, 32);
+  assert.equal(hash.length, 128);
+
+  assert.equal(await verifyPassword('correct horse battery staple', stored), true);
+  assert.equal(await verifyPassword('the wrong password', stored), false);
+});
+
+test('the same password hashes differently every time', async () => {
+  // A per-password salt is what stops one leaked table revealing shared passwords.
+  const a = await hashPassword('password123');
+  const b = await hashPassword('password123');
+  assert.notEqual(a, b);
+  assert.equal(await verifyPassword('password123', a), true);
+  assert.equal(await verifyPassword('password123', b), true);
+});
+
+test('a malformed stored hash is refused rather than throwing', async () => {
+  for (const bad of ['', 'nosalt', ':', 'salt:', ':hash']) {
+    assert.equal(await verifyPassword('password123', bad), false);
+  }
+});
+
+test('hashing never runs synchronously', async () => {
+  // scrypt is slow by design; running it on the event loop stalls every other
+  // request on the server. These must stay thenable, so a revert to the *Sync
+  // form fails here rather than quietly costing throughput in production.
+  assert.equal(typeof hashPassword('password123').then, 'function');
+  const stored = await hashPassword('password123');
+  assert.equal(typeof verifyPassword('password123', stored).then, 'function');
 });

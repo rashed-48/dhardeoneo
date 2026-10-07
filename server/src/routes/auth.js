@@ -13,6 +13,13 @@ import { rateLimit } from '../lib/rateLimit.js';
 
 const router = Router();
 
+/**
+ * A well-formed hash that no password matches. Checking against it when the
+ * email is unknown makes a missing account cost the same scrypt work as a wrong
+ * password, so response time cannot be used to discover registered emails.
+ */
+const ABSENT_USER_HASH = `${'0'.repeat(32)}:${'0'.repeat(128)}`;
+
 const normaliseEmail = (value) => String(value || '').trim().toLowerCase();
 const validEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
 
@@ -22,7 +29,7 @@ function locationFor(areaName) {
   return area;
 }
 
-router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), (req, res) => {
+router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), async (req, res) => {
   const { name, email, password, phone = '', area = '', lat = null, lng = null } =
     req.body || {};
 
@@ -51,13 +58,20 @@ router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), (req, res) 
     .get(cleanEmail);
   if (taken) return res.status(409).json({ error: 'That email is already registered.' });
 
+  let passwordHash;
+  try {
+    passwordHash = await hashPassword(cleanPassword);
+  } catch {
+    return res.status(500).json({ error: 'Could not create the account. Try again.' });
+  }
+
   const info = db
     .prepare(
       `INSERT INTO users (name, email, password_hash, phone, area, lat, lng)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
-      cleanName, cleanEmail, hashPassword(cleanPassword), cleanPhone,
+      cleanName, cleanEmail, passwordHash, cleanPhone,
       location.name, location.lat, location.lng
     );
 
@@ -66,7 +80,7 @@ router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), (req, res) 
   res.status(201).json({ user: publicUser(user) });
 });
 
-router.post('/login', rateLimit({ windowMs: 15 * 60_000, max: 10 }), (req, res) => {
+router.post('/login', rateLimit({ windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
   const { email, password } = req.body || {};
   const cleanEmail = normaliseEmail(email);
   const cleanPassword = String(password || '');
@@ -76,7 +90,13 @@ router.post('/login', rateLimit({ windowMs: 15 * 60_000, max: 10 }), (req, res) 
     .prepare('SELECT * FROM users WHERE email = ?')
     .get(cleanEmail);
 
-  if (!user || !verifyPassword(cleanPassword, user.password_hash))
+  let matches = false;
+  try {
+    matches = await verifyPassword(cleanPassword, user ? user.password_hash : ABSENT_USER_HASH);
+  } catch {
+    matches = false;
+  }
+  if (!user || !matches)
     return res.status(401).json({ error: 'Wrong email or password.' });
 
   setSession(res, user);

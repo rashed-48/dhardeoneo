@@ -100,14 +100,14 @@ function reset() {
   }
 }
 
-export function seed() {
+export async function seed() {
   reset();
 
   const insertUser = db.prepare(
     `INSERT INTO users (name, email, password_hash, phone, area, lat, lng, bio)
      VALUES (?,?,?,?,?,?,?,?)`
   );
-  const pw = hashPassword('password123');
+  const pw = await hashPassword('password123');
   const userIds = USERS.map(([name, email, phone, areaName, bio]) => {
     const a = area(areaName);
     return Number(
@@ -261,4 +261,4 @@ export function seed() {
 }
 
 // Only seed when run as a script — importing this module must have no effect.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) seed();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await seed();

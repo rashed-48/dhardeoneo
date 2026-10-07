@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 import jwt from 'jsonwebtoken';
 import { db } from '../db.js';
 
@@ -52,16 +53,25 @@ const cookieOptions = () => ({
   maxAge: IDLE_WINDOW_MS,
 });
 
-export function hashPassword(password) {
+/**
+ * scrypt is deliberately slow, which is the point for a password hash and the
+ * reason it must not run synchronously: the synchronous form blocks the event
+ * loop for the whole derivation, so concurrent sign-ins queue behind each other
+ * and every other request on the server stalls with them. The callback form
+ * runs on libuv's thread pool instead, leaving the loop free.
+ */
+const scrypt = promisify(crypto.scrypt);
+
+export async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  const hash = (await scrypt(password, salt, 64)).toString('hex');
   return `${salt}:${hash}`;
 }
 
-export function verifyPassword(password, stored) {
+export async function verifyPassword(password, stored) {
   const [salt, hash] = String(stored).split(':');
   if (!salt || !hash) return false;
-  const candidate = crypto.scryptSync(password, salt, 64);
+  const candidate = await scrypt(password, salt, 64);
   const known = Buffer.from(hash, 'hex');
   return candidate.length === known.length && crypto.timingSafeEqual(candidate, known);
 }
