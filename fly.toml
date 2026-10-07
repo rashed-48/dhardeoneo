@@ -1,5 +1,11 @@
 # Fly.io — https://fly.io/docs/reference/configuration/
-# Deploy: fly launch --no-deploy && fly volumes create shelf_data --size 1 && fly deploy
+# Deploy:
+#   fly launch --no-deploy
+#   fly secrets set DATABASE_URL=... SHELF_SECRET=...
+#   fly deploy
+#
+# State lives in Postgres, so no volume is required. Mount one only if cover art
+# fetched after deploy should survive a restart.
 app = "shelf"
 primary_region = "sin"   # Singapore is the closest region to Dhaka
 
@@ -9,10 +15,6 @@ primary_region = "sin"   # Singapore is the closest region to Dhaka
 [env]
   PORT = "4000"
   SHELF_DATA_DIR = "/data"
-
-[[mounts]]
-  source = "shelf_data"
-  destination = "/data"
 
 [http_service]
   internal_port = 4000

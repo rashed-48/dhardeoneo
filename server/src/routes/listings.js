@@ -1,11 +1,11 @@
-import { Router } from 'express';
+import { asyncRouter } from '../lib/router.js';
 import { db } from '../db.js';
 import { requireAuth } from '../lib/auth.js';
 import { distanceKm, CATEGORIES, AREAS } from '../lib/geo.js';
 import { cacheCoverFor } from '../lib/openlibrary.js';
 import { rateLimit } from '../lib/rateLimit.js';
 
-const router = Router();
+const router = asyncRouter();
 
 const BASE_SELECT = `
   SELECT
@@ -75,7 +75,7 @@ function score(i) {
  * q, category, maxPrice, minRating, maxDistance, lat, lng, sort, availableOnly
  * Distance is computed in JS (dataset is small) so ranking stays exact.
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const {
     q = '',
     category = '',
@@ -96,7 +96,12 @@ router.get('/', (req, res) => {
   const params = [];
 
   if (String(q).trim()) {
-    where.push('(l.title LIKE ? OR l.author LIKE ? OR l.category LIKE ? OR l.description LIKE ?)');
+    // ILIKE, not LIKE: SQLite's LIKE ignored case for ASCII and Postgres's
+    // does not, so a plain LIKE here would quietly stop matching 'sapiens'
+    // against 'Sapiens'.
+    where.push(
+      '(l.title ILIKE ? OR l.author ILIKE ? OR l.category ILIKE ? OR l.description ILIKE ?)'
+    );
     const like = '%' + String(q).trim().slice(0, 100) + '%';
     params.push(like, like, like, like);
   }
@@ -113,7 +118,7 @@ router.get('/', (req, res) => {
     params.push(Number(ownerId));
   }
 
-  const rows = db.prepare(BASE_SELECT + ' WHERE ' + where.join(' AND ')).all(...params);
+  const rows = await db.prepare(BASE_SELECT + ' WHERE ' + where.join(' AND ')).all(...params);
 
   const origin =
     lat && lng ? { lat: Number(lat), lng: Number(lng) } : null;
@@ -140,14 +145,14 @@ router.get('/', (req, res) => {
   res.json({ count: items.length, items });
 });
 
-router.get('/meta', (_req, res) => {
-  const counts = db
+router.get('/meta', async (_req, res) => {
+  const counts = await db
     .prepare(
       `SELECT category, COUNT(*) AS n FROM listings WHERE status = 'available'
        GROUP BY category ORDER BY n DESC`
     )
     .all();
-  const range = db
+  const range = await db
     .prepare(
       `SELECT MIN(price_per_day) AS min, MAX(price_per_day) AS max
        FROM listings WHERE status = 'available'`
@@ -160,8 +165,8 @@ router.get('/meta', (_req, res) => {
       count: counts.find((c) => c.category === name)?.n || 0,
     })),
     priceRange: { min: range?.min ?? 0, max: range?.max ?? 100 },
-    totalBooks: db.prepare("SELECT COUNT(*) AS n FROM listings WHERE status='available'").get().n,
-    totalLenders: db.prepare('SELECT COUNT(DISTINCT owner_id) AS n FROM listings').get().n,
+    totalBooks: (await db.prepare("SELECT COUNT(*) AS n FROM listings WHERE status='available'").get()).n,
+    totalLenders: (await db.prepare('SELECT COUNT(DISTINCT owner_id) AS n FROM listings').get()).n,
   });
 });
 
@@ -185,8 +190,8 @@ router.get('/cover-lookup', requireAuth, rateLimit({ windowMs: 15 * 60_000, max:
   }
 });
 
-router.get('/:id', (req, res) => {
-  const row = db.prepare(BASE_SELECT + ' WHERE l.id = ?').get(Number(req.params.id));
+router.get('/:id', async (req, res) => {
+  const row = await db.prepare(BASE_SELECT + ' WHERE l.id = ?').get(Number(req.params.id));
   if (!row) return res.status(404).json({ error: 'Book not found.' });
 
   const origin =
@@ -196,14 +201,15 @@ router.get('/:id', (req, res) => {
         ? { lat: req.user.lat, lng: req.user.lng }
         : null;
 
-  const reviews = db
-    .prepare(
-      `SELECT r.*, u.name AS reviewer_name
-       FROM reviews r JOIN users u ON u.id = r.reviewer_id
-       WHERE r.listing_id = ? ORDER BY r.created_at DESC`
-    )
-    .all(row.id)
-    .map((r) => ({
+  const reviews = (
+    await db
+      .prepare(
+        `SELECT r.*, u.name AS reviewer_name
+         FROM reviews r JOIN users u ON u.id = r.reviewer_id
+         WHERE r.listing_id = ? ORDER BY r.created_at DESC`
+      )
+      .all(row.id)
+  ).map((r) => ({
       id: r.id,
       rating: r.rating,
       comment: r.comment,
@@ -211,17 +217,18 @@ router.get('/:id', (req, res) => {
       createdAt: r.created_at,
     }));
 
-  const busy = db
+  const busy = await db
     .prepare(
       `SELECT start_date AS startDate, end_date AS endDate FROM rentals
        WHERE listing_id = ? AND status IN ('approved','active')`
     )
     .all(row.id);
 
-  const alsoFrom = db
-    .prepare(BASE_SELECT + " WHERE l.owner_id = ? AND l.id != ? AND l.status = 'available' LIMIT 4")
-    .all(row.owner_id, row.id)
-    .map((r) => present(r, origin));
+  const alsoFrom = (
+    await db
+      .prepare(BASE_SELECT + " WHERE l.owner_id = ? AND l.id != ? AND l.status = 'available' LIMIT 4")
+      .all(row.owner_id, row.id)
+  ).map((r) => present(r, origin));
 
   res.json({ listing: present(row, origin), reviews, busy, alsoFrom });
 });
@@ -308,14 +315,14 @@ function listingPayload(body, user, { existingCover = null } = {}) {
   };
 }
 
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   let p;
   try {
     p = listingPayload(req.body || {}, req.user);
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO listings
        (owner_id, title, author, category, language, condition, description,
@@ -328,12 +335,12 @@ router.post('/', requireAuth, (req, res) => {
       p.area, p.lat, p.lng, p.status
     );
 
-  const row = db.prepare(BASE_SELECT + ' WHERE l.id = ?').get(info.lastInsertRowid);
+  const row = await db.prepare(BASE_SELECT + ' WHERE l.id = ?').get(info.lastInsertRowid);
   res.status(201).json({ listing: present(row, null) });
 });
 
-router.patch('/:id', requireAuth, (req, res) => {
-  const existing = db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(req.params.id));
+router.patch('/:id', requireAuth, async (req, res) => {
+  const existing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(req.params.id));
   if (!existing) return res.status(404).json({ error: 'Book not found.' });
   if (existing.owner_id !== req.user.id)
     return res.status(403).json({ error: 'This is not your listing.' });
@@ -347,7 +354,7 @@ router.patch('/:id', requireAuth, (req, res) => {
     return res.status(400).json({ error: e.message });
   }
 
-  db.prepare(
+  await db.prepare(
     `UPDATE listings SET title=?, author=?, category=?, language=?, condition=?,
        description=?, cover_url=?, price_per_day=?, deposit=?, min_days=?, max_days=?,
        area=?, lat=?, lng=?, status=? WHERE id = ?`
@@ -357,25 +364,25 @@ router.patch('/:id', requireAuth, (req, res) => {
     p.status, existing.id
   );
 
-  const row = db.prepare(BASE_SELECT + ' WHERE l.id = ?').get(existing.id);
+  const row = await db.prepare(BASE_SELECT + ' WHERE l.id = ?').get(existing.id);
   res.json({ listing: present(row, null) });
 });
 
-router.delete('/:id', requireAuth, (req, res) => {
-  const existing = db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(req.params.id));
+router.delete('/:id', requireAuth, async (req, res) => {
+  const existing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(req.params.id));
   if (!existing) return res.status(404).json({ error: 'Book not found.' });
   if (existing.owner_id !== req.user.id)
     return res.status(403).json({ error: 'This is not your listing.' });
 
-  const live = db
+  const live = (await db
     .prepare(
        `SELECT COUNT(*) AS n FROM rentals WHERE listing_id = ?`
     )
-    .get(existing.id).n;
+    .get(existing.id)).n;
   if (live > 0)
     return res.status(409).json({ error: 'Listings with rental history are kept for the payment record.' });
 
-  db.prepare('DELETE FROM listings WHERE id = ?').run(existing.id);
+  await db.prepare('DELETE FROM listings WHERE id = ?').run(existing.id);
   res.json({ ok: true });
 });
 

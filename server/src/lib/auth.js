@@ -124,12 +124,12 @@ function readCookie(req, name) {
   return null;
 }
 
-function userFromRequest(req) {
+async function userFromRequest(req) {
   const token = readCookie(req, COOKIE_NAME);
   if (!token) return null;
   try {
     const claims = jwt.verify(token, SECRET, { ...CLAIMS, algorithms: ['HS256'] });
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(claims.uid);
+    const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(claims.uid);
     if (!user) return null;
 
     // Tokens issued before `sat` existed are treated as starting now; they
@@ -145,8 +145,15 @@ function userFromRequest(req) {
  * Attaches req.user when a valid cookie is present, and slides the session
  * forward once it is past the halfway mark — never rejects.
  */
-export function attachUser(req, res, next) {
-  const session = userFromRequest(req);
+export async function attachUser(req, res, next) {
+  // Documented as never rejecting, so a database blip signs the request out
+  // rather than failing it.
+  let session = null;
+  try {
+    session = await userFromRequest(req);
+  } catch {
+    session = null;
+  }
   req.user = session?.user ?? null;
   if (!session) return next();
 

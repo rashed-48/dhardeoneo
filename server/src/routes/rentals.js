@@ -1,10 +1,10 @@
-import { Router } from 'express';
-import { db } from '../db.js';
+import { asyncRouter } from '../lib/router.js';
+import { db, transaction } from '../db.js';
 import { requireAuth } from '../lib/auth.js';
 import { charge, refund, payout } from '../lib/payments.js';
 import { rateLimit } from '../lib/rateLimit.js';
 
-const router = Router();
+const router = asyncRouter();
 
 export const SERVICE_FEE_RATE = 0.05;
 export const SERVICE_FEE_MIN = 5;
@@ -29,18 +29,6 @@ export const isDate = (value) => {
 };
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
-
-function transaction(fn) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-}
 
 const RENTAL_SELECT = `
   SELECT rt.*,
@@ -67,11 +55,12 @@ const presentPayment = (p) => ({
   createdAt: p.created_at,
 });
 
-const paymentsFor = (rentalId) =>
-  db
-    .prepare('SELECT * FROM payments WHERE rental_id = ? ORDER BY id')
-    .all(rentalId)
-    .map(presentPayment);
+const paymentsFor = async (rentalId) =>
+  (
+    await db
+      .prepare('SELECT * FROM payments WHERE rental_id = ? ORDER BY id')
+      .all(rentalId)
+  ).map(presentPayment);
 
 /** Contact details only unlock once the lender has accepted. */
 function present(r, viewerId, payments = []) {
@@ -134,13 +123,13 @@ const recordPayment = db.prepare(
    VALUES (?,?,?,?,?,?,?,?,?,?,?)`
 );
 
-const loadRental = (id) => db.prepare(RENTAL_SELECT + ' WHERE rt.id = ?').get(id);
+const loadRental = async (id) => db.prepare(RENTAL_SELECT + ' WHERE rt.id = ?').get(id);
 
 /** POST /api/rentals — borrower requests a book for N days. */
-router.post('/', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 30 }), (req, res) => {
+router.post('/', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 30 }), async (req, res) => {
   const { listingId, startDate, days, message = '' } = req.body || {};
 
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(listingId));
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(listingId));
   if (!listing) return res.status(404).json({ error: 'Book not found.' });
   if (listing.status !== 'available')
     return res.status(409).json({ error: 'This book is not being lent right now.' });
@@ -160,28 +149,28 @@ router.post('/', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 30 }), (re
     return res.status(400).json({ error: 'The start date cannot be in the past.' });
   const end = addDays(start, n);
 
-  const clash = db
+  const clash = (await db
     .prepare(
       `SELECT COUNT(*) AS n FROM rentals
        WHERE listing_id = ? AND status IN ('approved','active')
          AND NOT (end_date <= ? OR start_date >= ?)`
     )
-    .get(listing.id, start, end).n;
+    .get(listing.id, start, end)).n;
   if (clash > 0)
     return res.status(409).json({ error: 'The book is already lent out for those dates.' });
 
-  const duplicate = db
+  const duplicate = (await db
     .prepare(
       `SELECT COUNT(*) AS n FROM rentals
        WHERE listing_id = ? AND borrower_id = ? AND status = 'requested'`
     )
-    .get(listing.id, req.user.id).n;
+    .get(listing.id, req.user.id)).n;
   if (duplicate > 0)
     return res.status(409).json({ error: 'You already have a pending request on this book.' });
 
   const q = quote(listing.price_per_day, n, listing.deposit);
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO rentals
        (listing_id, borrower_id, owner_id, start_date, end_date, days,
@@ -194,15 +183,15 @@ router.post('/', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 30 }), (re
       String(message).slice(0, 500)
     );
 
-  res.status(201).json({ rental: present(loadRental(info.lastInsertRowid), req.user.id) });
+  res.status(201).json({ rental: present(await loadRental(info.lastInsertRowid), req.user.id) });
 });
 
 /** GET /api/rentals?role=borrower|lender */
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const role = req.query.role === 'lender' ? 'lender' : 'borrower';
   const column = role === 'lender' ? 'rt.owner_id' : 'rt.borrower_id';
 
-  const rows = db
+  const rows = await db
     .prepare(RENTAL_SELECT + ` WHERE ${column} = ? ORDER BY rt.created_at DESC`)
     .all(req.user.id);
 
@@ -210,14 +199,15 @@ router.get('/', requireAuth, (req, res) => {
   const byRental = new Map();
   if (rows.length) {
     const ids = rows.map((r) => r.id);
-    db.prepare(
-      `SELECT * FROM payments WHERE rental_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`
-    )
-      .all(...ids)
-      .forEach((p) => {
-        if (!byRental.has(p.rental_id)) byRental.set(p.rental_id, []);
-        byRental.get(p.rental_id).push(presentPayment(p));
-      });
+    const ledger = await db
+      .prepare(
+        `SELECT * FROM payments WHERE rental_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`
+      )
+      .all(...ids);
+    for (const p of ledger) {
+      if (!byRental.has(p.rental_id)) byRental.set(p.rental_id, []);
+      byRental.get(p.rental_id).push(presentPayment(p));
+    }
   }
 
   res.json({
@@ -229,8 +219,8 @@ router.get('/', requireAuth, (req, res) => {
  * POST /api/rentals/:id/pay — borrower settles the bill once the lender accepts.
  * The card details are passed straight to the gateway; only brand and last4 persist.
  */
-router.post('/:id/pay', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 10 }), (req, res) => {
-  const rental = db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
+router.post('/:id/pay', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
+  const rental = await db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
   if (!rental) return res.status(404).json({ error: 'Rental not found.' });
   if (rental.borrower_id !== req.user.id)
     return res.status(403).json({ error: 'Only the borrower can pay for this rental.' });
@@ -247,26 +237,26 @@ router.post('/:id/pay', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 10 
     amount: rental.total,
   });
 
-  transaction(() => {
-    recordPayment.run(
+  await transaction(async () => {
+    await recordPayment.run(
       rental.id, rental.borrower_id, null, 'rental', rental.total,
       result.ok ? 'succeeded' : 'failed', 'card',
       result.brand, result.last4, result.reference, result.failureReason
     );
     if (result.ok)
-      db.prepare("UPDATE rentals SET paid_at = datetime('now') WHERE id = ? AND paid_at IS NULL")
+      await db.prepare("UPDATE rentals SET paid_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ? AND paid_at IS NULL")
         .run(rental.id);
   });
 
   if (!result.ok) return res.status(402).json({ error: result.failureReason });
 
-  const fresh = loadRental(rental.id);
-  res.json({ rental: present(fresh, req.user.id, paymentsFor(rental.id)) });
+  const fresh = await loadRental(rental.id);
+  res.json({ rental: present(fresh, req.user.id, await paymentsFor(rental.id)) });
 });
 
 /** POST /api/rentals/:id/review — borrower rates a finished rental. */
-router.post('/:id/review', requireAuth, (req, res) => {
-  const rental = db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
+router.post('/:id/review', requireAuth, async (req, res) => {
+  const rental = await db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
   if (!rental) return res.status(404).json({ error: 'Rental not found.' });
   if (rental.borrower_id !== req.user.id)
     return res.status(403).json({ error: 'Only the borrower can review.' });
@@ -277,10 +267,10 @@ router.post('/:id/review', requireAuth, (req, res) => {
   if (!Number.isFinite(rating) || rating < 1 || rating > 5)
     return res.status(400).json({ error: 'Rating must be 1 to 5.' });
 
-  const already = db.prepare('SELECT id FROM reviews WHERE rental_id = ?').get(rental.id);
+  const already = await db.prepare('SELECT id FROM reviews WHERE rental_id = ?').get(rental.id);
   if (already) return res.status(409).json({ error: 'You already reviewed this rental.' });
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO reviews (rental_id, listing_id, owner_id, reviewer_id, rating, comment)
      VALUES (?,?,?,?,?,?)`
   ).run(
@@ -309,12 +299,15 @@ const TRANSITIONS = {
 };
 
 /** Returning the book releases the deposit to the borrower and the rent to the lender. */
-function settle(rental) {
+async function settle(rental) {
   if (rental.settled_at || !rental.paid_at) return Boolean(rental.settled_at);
 
   const previous = new Set(
-    db.prepare("SELECT kind FROM payments WHERE rental_id = ? AND status = 'succeeded'")
-      .all(rental.id).map((row) => row.kind)
+    (
+      await db
+        .prepare("SELECT kind FROM payments WHERE rental_id = ? AND status = 'succeeded'")
+        .all(rental.id)
+    ).map((row) => row.kind)
   );
   const attempts = [];
   let depositOk = rental.deposit === 0 || previous.has('deposit_refund');
@@ -334,51 +327,51 @@ function settle(rental) {
   }
 
   const complete = depositOk && payoutOk;
-  transaction(() => {
+  await transaction(async () => {
     for (const [payeeId, kind, amount, result, method] of attempts) {
-      recordPayment.run(
+      await recordPayment.run(
         rental.id, null, payeeId, kind, amount, result.ok ? 'succeeded' : 'failed', method,
         '', '', result.reference, result.failureReason
       );
     }
     if (complete)
-      db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ? AND settled_at IS NULL")
+      await db.prepare("UPDATE rentals SET settled_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ? AND settled_at IS NULL")
         .run(rental.id);
   });
   return complete;
 }
 
 /** Cancelling a paid rental returns everything the borrower handed over. */
-function refundCancellation(rental) {
+async function refundCancellation(rental) {
   if (!rental.paid_at || rental.settled_at) return Boolean(rental.settled_at);
-  const alreadyRefunded = db.prepare(
+  const alreadyRefunded = await db.prepare(
     "SELECT id FROM payments WHERE rental_id = ? AND kind = 'cancellation_refund' AND status = 'succeeded'"
   ).get(rental.id);
   if (alreadyRefunded) {
-    transaction(() => {
-      db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ? AND settled_at IS NULL")
+    await transaction(async () => {
+      await db.prepare("UPDATE rentals SET settled_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ? AND settled_at IS NULL")
         .run(rental.id);
     });
     return true;
   }
   const r = refund({ amount: rental.total });
-  transaction(() => {
-    recordPayment.run(
+  await transaction(async () => {
+    await recordPayment.run(
       rental.id, null, rental.borrower_id, 'cancellation_refund', rental.total,
       r.ok ? 'succeeded' : 'failed', 'card', '', '', r.reference, r.failureReason
     );
     if (r.ok)
-      db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ? AND settled_at IS NULL")
+      await db.prepare("UPDATE rentals SET settled_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') WHERE id = ? AND settled_at IS NULL")
         .run(rental.id);
   });
   return r.ok;
 }
 
-router.post('/:id/:action', requireAuth, (req, res) => {
+router.post('/:id/:action', requireAuth, async (req, res) => {
   const rule = TRANSITIONS[req.params.action];
   if (!rule) return res.status(404).json({ error: 'Unknown action.' });
 
-  const rental = db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
+  const rental = await db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
   if (!rental) return res.status(404).json({ error: 'Rental not found.' });
 
   const allowed =
@@ -394,7 +387,7 @@ router.post('/:id/:action', requireAuth, (req, res) => {
 
   // Approving one request auto-declines others that overlap the same dates.
   if (rule.to === 'approved') {
-    db.prepare(
+    await db.prepare(
       `UPDATE rentals SET status = 'declined'
        WHERE listing_id = ? AND id != ? AND status = 'requested'
          AND NOT (end_date <= ? OR start_date >= ?)`
@@ -402,15 +395,15 @@ router.post('/:id/:action', requireAuth, (req, res) => {
   }
 
   if (req.params.action !== 'settle')
-    db.prepare('UPDATE rentals SET status = ? WHERE id = ?').run(rule.to, rental.id);
+    await db.prepare('UPDATE rentals SET status = ? WHERE id = ?').run(rule.to, rental.id);
 
   let settlementComplete = true;
-  if (rule.to === 'returned') settlementComplete = settle({ ...rental, status: 'returned' });
-  if (rule.to === 'cancelled') settlementComplete = refundCancellation(rental);
+  if (rule.to === 'returned') settlementComplete = await settle({ ...rental, status: 'returned' });
+  if (rule.to === 'cancelled') settlementComplete = await refundCancellation(rental);
 
-  const fresh = loadRental(rental.id);
+  const fresh = await loadRental(rental.id);
   res.status(settlementComplete ? 200 : 202).json({
-    rental: present(fresh, req.user.id, paymentsFor(rental.id)),
+    rental: present(fresh, req.user.id, await paymentsFor(rental.id)),
     warning: settlementComplete ? undefined : 'Settlement is pending. Retry it from the lender dashboard.',
   });
 });

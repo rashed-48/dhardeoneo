@@ -8,18 +8,26 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { after, before } from 'node:test';
+import pg from 'pg';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = path.join(here, '..', 'src', 'index.js');
 
 const PORT = 4300 + Math.floor(Math.random() * 400);
 const BASE = `http://127.0.0.1:${PORT}`;
-const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'shelf-api-test-'));
+/**
+ * The suite creates its own database, so it never touches development data and
+ * two runs cannot collide. Point SHELF_TEST_DATABASE_URL at any Postgres; the
+ * default matches the container in the README.
+ */
+const ADMIN_URL =
+  process.env.SHELF_TEST_DATABASE_URL || 'postgres://shelf:devpass@localhost:5433/shelf';
+const TEST_DB = `shelf_test_${process.pid}_${Date.now().toString(36)}`;
+const DATABASE_URL = new URL(ADMIN_URL);
+DATABASE_URL.pathname = `/${TEST_DB}`;
 
 const GOOD_CARD = { number: '4242424242424242', expMonth: 12, expYear: 2031, cvc: '123' };
 const DECLINED_CARD = { ...GOOD_CARD, number: '4000000000000002' };
@@ -107,11 +115,27 @@ async function freshListing(lender, overrides = {}) {
 }
 
 before(async () => {
+  const admin = new pg.Client({ connectionString: ADMIN_URL });
+  try {
+    await admin.connect();
+  } catch (error) {
+    throw new Error(
+      `These tests need Postgres. Start one with:
+` +
+        `  docker run -d --rm --name shelf-pg -e POSTGRES_PASSWORD=devpass ` +
+        `-e POSTGRES_USER=shelf -e POSTGRES_DB=shelf -p 5433:5432 postgres:17-alpine
+` +
+        `or set SHELF_TEST_DATABASE_URL. (${error.message})`
+    );
+  }
+  await admin.query(`CREATE DATABASE "${TEST_DB}"`);
+  await admin.end();
+
   server = spawn(process.execPath, [SERVER_ENTRY], {
     env: {
       ...process.env,
       PORT: String(PORT),
-      SHELF_DATA_DIR: DATA_DIR,
+      DATABASE_URL: DATABASE_URL.href,
       SHELF_SECRET: 'test-secret-that-is-long-enough',
       NODE_ENV: 'test',
     },
@@ -141,11 +165,14 @@ after(async () => {
     server.kill();
     await exited;
   }
-  // The child only releases the database as it exits, so retry briefly.
+  // Drop the throwaway database once the server has let go of it.
   try {
-    fs.rmSync(DATA_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    const admin = new pg.Client({ connectionString: ADMIN_URL });
+    await admin.connect();
+    await admin.query(`DROP DATABASE IF EXISTS "${TEST_DB}" WITH (FORCE)`);
+    await admin.end();
   } catch {
-    /* a leftover temp directory is not worth failing the suite over */
+    /* a leftover test database is not worth failing the suite over */
   }
 });
 

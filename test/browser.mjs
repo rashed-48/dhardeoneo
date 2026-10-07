@@ -13,6 +13,7 @@
  * on a form.
  */
 import { spawn, spawnSync } from 'node:child_process';
+import pg from 'pg';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +25,13 @@ const PORT = 4400 + Math.floor(Math.random() * 400);
 const APP = `http://127.0.0.1:${PORT}`;
 const DEBUG_PORT = PORT + 1000;
 const WORK_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'shelf-browser-'));
+
+/** Its own database, so a run never touches development data. */
+const ADMIN_URL =
+  process.env.SHELF_TEST_DATABASE_URL || 'postgres://shelf:devpass@localhost:5433/shelf';
+const TEST_DB = `shelf_browser_${process.pid}_${Date.now().toString(36)}`;
+const DATABASE_URL = new URL(ADMIN_URL);
+DATABASE_URL.pathname = `/${TEST_DB}`;
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
@@ -62,12 +70,18 @@ async function main() {
   });
   if (build.status !== 0) throw new Error('web build failed');
 
+  console.log('Creating a throwaway database...');
+  const admin = new pg.Client({ connectionString: ADMIN_URL });
+  await admin.connect();
+  await admin.query(`CREATE DATABASE "${TEST_DB}"`);
+  await admin.end();
+
   console.log(`Starting the server on ${PORT}...`);
   server = spawn(process.execPath, [path.join(ROOT, 'server', 'src', 'index.js')], {
     env: {
       ...process.env,
       PORT: String(PORT),
-      SHELF_DATA_DIR: path.join(WORK_DIR, 'data'),
+      DATABASE_URL: DATABASE_URL.href,
       SHELF_SECRET: 'browser-test-secret-long-enough',
       NODE_ENV: 'test', // keeps the cookie usable over plain http
     },
@@ -279,6 +293,14 @@ try {
     await exited;
   }
   await sleep(500);
+  try {
+    const admin = new pg.Client({ connectionString: ADMIN_URL });
+    await admin.connect();
+    await admin.query(`DROP DATABASE IF EXISTS "${TEST_DB}" WITH (FORCE)`);
+    await admin.end();
+  } catch {
+    /* a leftover test database is not worth failing the run over */
+  }
   // Chrome profiles are hundreds of megabytes; never leave them behind.
   try {
     fs.rmSync(WORK_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });

@@ -1,18 +1,19 @@
 # Render blueprint — https://render.com/docs/blueprint-spec
 # Deploy: push this repo to GitHub, then New > Blueprint in the Render dashboard.
+#
+# The database is Neon, not Render, so this runs on the free plan: free web
+# services have no disk, which is exactly why the app no longer keeps state on
+# one. Create the Neon project in the same region as this service.
 services:
   - type: web
     name: shelf
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter          # `free` works too, but free instances have no disk
+    plan: free             # free spins down after 15 minutes idle; `starter` does not
+    region: singapore      # keep this and the Neon project in one region
     healthCheckPath: /api/health
     envVars:
       - key: SHELF_SECRET
         generateValue: true   # Render generates and stores a random secret
-      - key: SHELF_DATA_DIR
-        value: /data
-    disk:
-      name: shelf-data
-      mountPath: /data       # keeps the database across deploys
-      sizeGB: 1
+      - key: DATABASE_URL
+        sync: false           # paste the Neon connection string in the dashboard

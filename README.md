@@ -7,11 +7,22 @@ leave a review.
 
 ## Run it
 
+Shelf keeps its data in **Postgres**, so you need one running. The quickest is Docker:
+
 ```bash
-npm run setup    # installs everything, seeds the demo data, downloads cover art
+npm run setup    # installs server and web dependencies
+npm run db:dev   # Postgres 17 in Docker on :5433 (npm run db:stop to stop it)
+
+cp .env.example server/.env          # then set DATABASE_URL and SHELF_SECRET
+npm run seed     # creates the schema and the demo data
+npm run covers   # downloads cover art
+
 npm run dev      # API on :4000, web on :5173
-npm test         # unit + API tests (no server needed)
+npm test         # unit + API tests
 ```
+
+For `DATABASE_URL`, the container above is `postgres://shelf:devpass@localhost:5433/shelf`.
+Any Postgres works — a local install or a hosted one such as Neon.
 
 Then open <http://localhost:5173>.
 
@@ -20,7 +31,8 @@ Demo account: **ayesha@shelf.app** / **password123** (the login screen has a
 waiting to be paid for, so the checkout screen is one click away.
 
 Other scripts: `npm run seed` resets the demo data, `npm run covers` fills in missing cover
-art (`-- --all` re-fetches everything), `npm run build` builds the frontend, and
+art (`-- --all` re-fetches everything, `-- --seed` works from the seed book list with no
+database — that is what the image build uses), `npm run build` builds the frontend, and
 `npm run dev:api` / `npm run dev:web` run one side only.
 
 ## Tests
@@ -30,6 +42,9 @@ npm test            # unit + API integration — fast, needs nothing running
 npm run test:browser  # drives the production build in headless Chrome
 npm run test:all      # both
 ```
+
+Both suites need Postgres. They create their own throwaway database per run, so they never
+touch development data; set `SHELF_TEST_DATABASE_URL` if yours is not the container above.
 
 `npm test` runs two files. [`core.test.js`](server/test/core.test.js) unit-tests the pure
 rules — the payment simulator, quote arithmetic, calendar dates, distance, password
@@ -182,34 +197,37 @@ git add -A && git commit -m "Shelf"
 git remote add origin git@github.com:<you>/shelf.git && git push -u origin main
 ```
 
-Then, on either host:
+The container holds no state, so the database is a separate managed service. Create it
+first, then point the app at it.
 
-**Render** — New > Blueprint, point it at the repo. [`render.yaml`](render.yaml) already
-declares the Docker build, the health check, a 1 GB disk at `/data`, and a generated
-`SHELF_SECRET`. Nothing else to fill in.
+**1. A Postgres database.** [Neon](https://neon.tech) has a free tier that suspends when idle
+and resumes on the next connection, with no manual step. Create a project, pick the region
+closest to where the app will run, and copy the connection string.
 
-**Fly.io** —
+**2. The app.** On Render: New > Blueprint, point it at the repo.
+[`render.yaml`](render.yaml) declares the Docker build, the health check and a generated
+`SHELF_SECRET`; paste the Neon connection string into `DATABASE_URL` and that is all.
 
-```bash
-fly launch --no-deploy            # reads fly.toml; pick your region
-fly volumes create shelf_data --size 1
-fly secrets set SHELF_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
-fly deploy
-```
+Any other Docker host (Fly.io, Railway, Koyeb, a VPS) works the same way — build the
+[`Dockerfile`](Dockerfile) and give it `DATABASE_URL` and `SHELF_SECRET`.
+[`fly.toml`](fly.toml) is set up for Fly.
 
-Any other Docker host (Railway, Koyeb, a VPS) works the same way — build the
-[`Dockerfile`](Dockerfile), give it a `SHELF_SECRET`, and mount a volume at `/data`.
+**Keep the app and the database in the same region.** Several endpoints run a handful of
+queries in sequence; inside one region that is about a millisecond each, across an ocean it
+is a few hundred.
 
 ### What the container does on boot
 
-1. Copies bundled cover art onto the data volume if one is mounted.
-2. **Seeds itself if the database is empty**, so a brand-new deploy comes up with all 34
+1. Copies bundled cover art onto the data directory if one is mounted.
+2. **Creates the schema if it is missing**, so a new database needs no migration step.
+3. **Seeds itself if the database is empty**, so a brand-new deploy comes up with all 34
    books rather than a blank page.
-3. Links any listing that has a cover file but no record of it.
+4. Links any listing that has a cover file but no record of it.
 
-That means the app is correct with *or without* a persistent disk. With a volume, data
-survives redeploys. Without one (Render's free tier has no disk), it simply resets to the
-demo data on restart — fine for showing the thing off, not for real users.
+Because the data lives in Postgres rather than on the container's disk, a redeploy or a
+restart keeps it — which is what makes a free instance with no disk workable. Cover art
+fetched *after* deploy is still written locally and does not survive without a volume;
+anything missing falls back to generated art.
 
 ### Environment
 
@@ -217,10 +235,12 @@ demo data on restart — fine for showing the thing off, not for real users.
 |---|---|---|
 | `SHELF_SECRET` | **production** | Signs session tokens. 16+ chars; 32 random bytes is right. |
 | `PORT` | no | Injected by most hosts. Defaults to 4000. |
-| `SHELF_DATA_DIR` | no | Where the database lives. Set to your volume mount, e.g. `/data`. |
-| `SHELF_COVERS_DIR` | no | Point at the volume to keep lender-fetched covers across deploys. |
+| `DATABASE_URL` | **yes** | Postgres connection string. The app will not boot without it. |
+| `SHELF_DATA_DIR` | no | Where covers fetched after deploy are written. |
+| `SHELF_COVERS_DIR` | no | Point at a volume to keep covers fetched after deploy. |
 | `SHELF_SESSION_IDLE_MINUTES` | no | Inactivity timeout, 1–1440. Defaults to 30. |
-| `SHELF_DB`, `SHELF_WEB_DIST` | no | Direct path overrides. |
+| `SHELF_DB_POOL` | no | Max pooled connections. Defaults to 10. |
+| `SHELF_WEB_DIST` | no | Direct path override. |
 
 Copy [.env.example](.env.example) to `.env` for local overrides.
 
@@ -254,14 +274,14 @@ returned to the page they were on.
 
 `SHELF_SESSION_IDLE_MINUTES` overrides the 30-minute window (1 to 1440).
 
-Requires **Node 24+** — `node:sqlite` needs `--experimental-sqlite` before then, which is
+Requires **Node 24+** — which is
 why the image is pinned to `node:24-slim`.
 
 ## Stack
 
 | | |
 |---|---|
-| Backend | Node + Express, SQLite via the built-in `node:sqlite` — no native module to compile |
+| Backend | Node + Express, Postgres via `pg` |
 | Auth | Short-lived HttpOnly JWT cookie, passwords hashed with `scrypt` from `node:crypto` |
 | Frontend | React 19 + Vite + React Router, Tailwind v4 |
 | Distance | Haversine from the borrower's chosen origin, computed per request |

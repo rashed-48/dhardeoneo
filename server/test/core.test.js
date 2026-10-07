@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import os from 'node:os';
-import path from 'node:path';
 import test from 'node:test';
 
-// Importing the rental module opens SQLite. Keep test state out of the repository.
-process.env.SHELF_DB = path.join(os.tmpdir(), `shelf-core-test-${process.pid}.db`);
+// These are pure-function tests, but importing the modules under test builds a
+// connection pool. node-postgres connects lazily, so an address nothing listens
+// on is never dialled — and a stray query here would fail loudly rather than
+// touch a real database.
+process.env.DATABASE_URL = 'postgres://unused:unused@127.0.0.1:1/none';
 
 const { charge, luhnValid } = await import('../src/lib/payments.js');
 const { distanceKm } = await import('../src/lib/geo.js');

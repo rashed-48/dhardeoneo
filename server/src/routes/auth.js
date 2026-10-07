@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { asyncRouter } from '../lib/router.js';
 import { db } from '../db.js';
 import {
   hashPassword,
@@ -11,7 +11,7 @@ import {
 import { AREAS } from '../lib/geo.js';
 import { rateLimit } from '../lib/rateLimit.js';
 
-const router = Router();
+const router = asyncRouter();
 
 /**
  * A well-formed hash that no password matches. Checking against it when the
@@ -53,7 +53,7 @@ router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), async (req,
   if (cleanPhone.length > 40)
     return res.status(400).json({ error: 'Phone number is too long.' });
 
-  const taken = db
+  const taken = await db
     .prepare('SELECT id FROM users WHERE email = ?')
     .get(cleanEmail);
   if (taken) return res.status(409).json({ error: 'That email is already registered.' });
@@ -65,7 +65,7 @@ router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), async (req,
     return res.status(500).json({ error: 'Could not create the account. Try again.' });
   }
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO users (name, email, password_hash, phone, area, lat, lng)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
@@ -75,7 +75,7 @@ router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), async (req,
       location.name, location.lat, location.lng
     );
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
+  const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
   setSession(res, user);
   res.status(201).json({ user: publicUser(user) });
 });
@@ -86,7 +86,7 @@ router.post('/login', rateLimit({ windowMs: 15 * 60_000, max: 10 }), async (req,
   const cleanPassword = String(password || '');
   if (!validEmail(cleanEmail) || cleanPassword.length > 256)
     return res.status(401).json({ error: 'Wrong email or password.' });
-  const user = db
+  const user = await db
     .prepare('SELECT * FROM users WHERE email = ?')
     .get(cleanEmail);
 
@@ -103,14 +103,14 @@ router.post('/login', rateLimit({ windowMs: 15 * 60_000, max: 10 }), async (req,
   res.json({ user: publicUser(user) });
 });
 
-router.post('/logout', (_req, res) => {
+router.post('/logout', async (_req, res) => {
   clearSession(res);
   res.status(204).end();
 });
 
 router.get('/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
 
-router.patch('/me', requireAuth, (req, res) => {
+router.patch('/me', requireAuth, async (req, res) => {
   const { name, phone, area, lat, lng, bio } = req.body || {};
   const u = req.user;
   const nextName = name === undefined ? u.name : String(name).trim();
@@ -125,14 +125,14 @@ router.patch('/me', requireAuth, (req, res) => {
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
-  db.prepare(
+  await db.prepare(
     `UPDATE users SET name = ?, phone = ?, area = ?, lat = ?, lng = ?, bio = ?
      WHERE id = ?`
   ).run(
     nextName, nextPhone, location.name, location.lat, location.lng, nextBio,
     u.id
   );
-  const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(u.id);
+  const fresh = await db.prepare('SELECT * FROM users WHERE id = ?').get(u.id);
   res.json({ user: publicUser(fresh) });
 });
 

@@ -15,13 +15,13 @@ COPY web ./web
 
 RUN npm --prefix web run build
 
-# Seed a throwaway database purely to discover which covers to fetch, then
-# drop it — the real database is created on first boot.
-# `covers` reaches a third-party API, so a blip must not fail the deploy —
+# Cover art is baked into the image so the running container never depends on
+# Open Library. `--seed` works straight from the seed book list, because there
+# is no database during a build: seeded listing ids follow that list order, so
+# files named after them still line up once the database is seeded.
+# The fetch reaches a third-party API, so a blip must not fail the deploy —
 # anything it misses falls back to generated cover art at runtime.
-RUN npm --prefix server run seed \
- && (npm --prefix server run covers || echo "cover fetch incomplete; using generated art") \
- && rm -f server/shelf.db server/shelf.db-wal server/shelf.db-shm
+RUN npm --prefix server run covers -- --seed || echo "cover fetch incomplete; using generated art"
 
 # ---- runtime ---------------------------------------------------------------
 FROM node:24-slim AS runtime
@@ -35,7 +35,8 @@ COPY --from=build /app/server/src ./server/src
 COPY --from=build /app/server/covers ./server/covers
 COPY --from=build /app/web/dist ./web/dist
 
-# Writable state lives here; mount a volume on it to survive redeploys.
+# State lives in Postgres (DATABASE_URL), so the container itself is
+# disposable. /data remains only for cover art fetched after deploy.
 ENV SHELF_DATA_DIR=/data
 RUN mkdir -p /data && chown -R node:node /data
 USER node

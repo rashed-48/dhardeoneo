@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { db } from './db.js';
+import { db, transaction } from './db.js';
 import { hashPassword } from './lib/auth.js';
 import { AREAS } from './lib/geo.js';
 import { quote } from './routes/rentals.js';
@@ -25,7 +25,7 @@ const USERS = [
 ];
 
 // title, author, category, language, condition, pricePerDay, deposit, minDays, maxDays, ownerIdx, description
-const BOOKS = [
+export const BOOKS = [
   ['Sapiens', 'Yuval Noah Harari', 'History', 'English', 'Like new', 18, 400, 3, 21, 0, 'Hardcover, no marks. One of my favourite reads, glad to pass it around.'],
   ['Atomic Habits', 'James Clear', 'Self-help', 'English', 'Good', 15, 300, 3, 14, 9, 'Slight crease on the spine. Highlighted a few lines in pencil, erasable.'],
   ['The Lean Startup', 'Eric Ries', 'Business', 'English', 'Good', 14, 300, 5, 30, 1, 'Great for anyone building a product. Pickup from Gulshan 2 circle.'],
@@ -84,37 +84,37 @@ const daysAgo = (n) => {
 };
 const daysFromNow = (n) => daysAgo(-n);
 
-function reset() {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    db.exec("UPDATE app_meta SET value = '1' WHERE key = 'ledger_cleanup'");
+async function reset() {
+  // Deleting rather than truncating keeps the reset on the same path the
+  // immutability triggers guard, which is why the flag has to be lifted first.
+  // A rollback restores the flag along with everything else.
+  await transaction(async () => {
+    await db.exec("UPDATE app_meta SET value = '1' WHERE key = 'ledger_cleanup'");
     for (const t of ['payments', 'reviews', 'rentals', 'listings', 'users']) {
-      db.exec(`DELETE FROM ${t}`);
-      db.exec(`DELETE FROM sqlite_sequence WHERE name = '${t}'`);
+      await db.exec(`DELETE FROM ${t}`);
+      await db.exec(`ALTER TABLE ${t} ALTER COLUMN id RESTART WITH 1`);
     }
-    db.exec("UPDATE app_meta SET value = '0' WHERE key = 'ledger_cleanup'");
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
+    await db.exec("UPDATE app_meta SET value = '0' WHERE key = 'ledger_cleanup'");
+  });
 }
 
 export async function seed() {
-  reset();
+  await reset();
 
   const insertUser = db.prepare(
     `INSERT INTO users (name, email, password_hash, phone, area, lat, lng, bio)
      VALUES (?,?,?,?,?,?,?,?)`
   );
   const pw = await hashPassword('password123');
-  const userIds = USERS.map(([name, email, phone, areaName, bio]) => {
+  // Ids must come out in list order — the cover files are named after them.
+  const userIds = [];
+  for (const [name, email, phone, areaName, bio] of USERS) {
     const a = area(areaName);
-    return Number(
-      insertUser.run(name, email, pw, phone, areaName, jitter(a.lat), jitter(a.lng), bio)
-        .lastInsertRowid
+    const { lastInsertRowid } = await insertUser.run(
+      name, email, pw, phone, areaName, jitter(a.lat), jitter(a.lng), bio
     );
-  });
+    userIds.push(Number(lastInsertRowid));
+  }
 
   const insertListing = db.prepare(
     `INSERT INTO listings
@@ -123,25 +123,25 @@ export async function seed() {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'available', ?)`
   );
 
-  const listingIds = BOOKS.map((b, i) => {
+  const listingIds = [];
+  for (const [i, b] of BOOKS.entries()) {
     const [title, author, category, language, condition, price, deposit, minD, maxD, ownerIdx, desc] = b;
     const ownerArea = USERS[ownerIdx][3];
     const a = area(ownerArea);
-    return Number(
-      insertListing.run(
-        userIds[ownerIdx], title, author, category, language, condition, desc,
-        price, deposit, minD, maxD, ownerArea, jitter(a.lat), jitter(a.lng),
-        daysAgo(60 - i)
-      ).lastInsertRowid
+    const { lastInsertRowid } = await insertListing.run(
+      userIds[ownerIdx], title, author, category, language, condition, desc,
+      price, deposit, minD, maxD, ownerArea, jitter(a.lat), jitter(a.lng),
+      daysAgo(60 - i)
     );
-  });
+    listingIds.push(Number(lastInsertRowid));
+  }
 
   // Listing ids are deterministic, so covers fetched earlier still match.
   let reattached = 0;
   const setCover = db.prepare('UPDATE listings SET cover_url = ? WHERE id = ?');
   for (const id of listingIds) {
     if (fs.existsSync(path.join(COVERS_DIR, `${id}.jpg`))) {
-      setCover.run(`/covers/${id}.jpg`, id);
+      await setCover.run(`/covers/${id}.jpg`, id);
       reattached++;
     }
   }
@@ -167,12 +167,12 @@ export async function seed() {
   const nextRef = (p) => `${p}_seed${String(++ref).padStart(6, '0')}`;
 
   /** A settled rental leaves three rows: the charge, the deposit back, the payout. */
-  function settleSeeded(rentalId, borrowerId, ownerId, q, when) {
+  async function settleSeeded(rentalId, borrowerId, ownerId, q, when) {
     const [brand, last4] = CARDS[rentalId % CARDS.length];
-    insertPayment.run(rentalId, borrowerId, null, 'rental', q.total, 'succeeded', 'card', brand, last4, nextRef('ch'), when);
+    await insertPayment.run(rentalId, borrowerId, null, 'rental', q.total, 'succeeded', 'card', brand, last4, nextRef('ch'), when);
     if (q.deposit > 0)
-      insertPayment.run(rentalId, null, borrowerId, 'deposit_refund', q.deposit, 'succeeded', 'card', brand, last4, nextRef('re'), when);
-    insertPayment.run(rentalId, null, ownerId, 'payout', q.subtotal, 'succeeded', 'transfer', '', '', nextRef('po'), when);
+      await insertPayment.run(rentalId, null, borrowerId, 'deposit_refund', q.deposit, 'succeeded', 'card', brand, last4, nextRef('re'), when);
+    await insertPayment.run(rentalId, null, ownerId, 'payout', q.subtotal, 'succeeded', 'transfer', '', '', nextRef('po'), when);
   }
 
   // A history of completed rentals gives listings and lenders real ratings.
@@ -193,21 +193,23 @@ export async function seed() {
       const settledAt = daysAgo(startedAgo - days);
 
       const rentalId = Number(
-        insertRental.run(
-          listingIds[i], userIds[borrowerIdx], userIds[ownerIdx],
-          daysAgo(startedAgo), daysAgo(startedAgo - days), days, BOOKS[i][5],
-          q.subtotal, q.serviceFee, q.deposit, q.total, '', 'returned',
-          daysAgo(startedAgo + 2), paidAt, settledAt
+        (
+          await insertRental.run(
+            listingIds[i], userIds[borrowerIdx], userIds[ownerIdx],
+            daysAgo(startedAgo), daysAgo(startedAgo - days), days, BOOKS[i][5],
+            q.subtotal, q.serviceFee, q.deposit, q.total, '', 'returned',
+            daysAgo(startedAgo + 2), paidAt, settledAt
+          )
         ).lastInsertRowid
       );
-      settleSeeded(rentalId, userIds[borrowerIdx], userIds[ownerIdx], q, settledAt);
+      await settleSeeded(rentalId, userIds[borrowerIdx], userIds[ownerIdx], q, settledAt);
       completed++;
 
       // Leave roughly a fifth of finished rentals unreviewed, like real life.
       if ((i + k) % 5 !== 4) {
         const [rating, comment] = REVIEW_TEXTS[reviewCursor % REVIEW_TEXTS.length];
         reviewCursor++;
-        insertReview.run(
+        await insertReview.run(
           rentalId, listingIds[i], userIds[ownerIdx], userIds[borrowerIdx],
           rating, comment, daysAgo(startedAgo - days - 1)
         );
@@ -218,19 +220,21 @@ export async function seed() {
   // A couple of books are currently out, and a couple of requests are pending.
   const liveQuote = quote(BOOKS[6][5], 14, BOOKS[6][6]);
   const liveId = Number(
-    insertRental.run(
-      listingIds[6], userIds[4], userIds[BOOKS[6][9]],
-      daysAgo(4), daysFromNow(10), 14, BOOKS[6][5],
-      liveQuote.subtotal, liveQuote.serviceFee, liveQuote.deposit, liveQuote.total,
-      'Need it for my algorithms final.', 'active', daysAgo(6), daysAgo(5), null
+    (
+      await insertRental.run(
+        listingIds[6], userIds[4], userIds[BOOKS[6][9]],
+        daysAgo(4), daysFromNow(10), 14, BOOKS[6][5],
+        liveQuote.subtotal, liveQuote.serviceFee, liveQuote.deposit, liveQuote.total,
+        'Need it for my algorithms final.', 'active', daysAgo(6), daysAgo(5), null
+      )
     ).lastInsertRowid
   );
-  insertPayment.run(
+  await insertPayment.run(
     liveId, userIds[4], null, 'rental', liveQuote.total, 'succeeded', 'card',
     'Visa', '4242', nextRef('ch'), daysAgo(5)
   );
   const pendingQuote = quote(BOOKS[12][5], 10, BOOKS[12][6]);
-  insertRental.run(
+  await insertRental.run(
     listingIds[12], userIds[0], userIds[BOOKS[12][9]],
     daysFromNow(2), daysFromNow(12), 10, BOOKS[12][5],
     pendingQuote.subtotal, pendingQuote.serviceFee, pendingQuote.deposit, pendingQuote.total,
@@ -239,7 +243,7 @@ export async function seed() {
 
   // One accepted-but-unpaid rental so the checkout screen has something to open.
   const awaitingQuote = quote(BOOKS[8][5], 7, BOOKS[8][6]);
-  insertRental.run(
+  await insertRental.run(
     listingIds[8], userIds[0], userIds[BOOKS[8][9]],
     daysFromNow(1), daysFromNow(8), 7, BOOKS[8][5],
     awaitingQuote.subtotal, awaitingQuote.serviceFee, awaitingQuote.deposit, awaitingQuote.total,
@@ -248,11 +252,11 @@ export async function seed() {
 
   const counts = {
     covers: reattached,
-    payments: db.prepare('SELECT COUNT(*) AS n FROM payments').get().n,
-    users: db.prepare('SELECT COUNT(*) AS n FROM users').get().n,
-    listings: db.prepare('SELECT COUNT(*) AS n FROM listings').get().n,
-    rentals: db.prepare('SELECT COUNT(*) AS n FROM rentals').get().n,
-    reviews: db.prepare('SELECT COUNT(*) AS n FROM reviews').get().n,
+    payments: (await db.prepare('SELECT COUNT(*) AS n FROM payments').get()).n,
+    users: (await db.prepare('SELECT COUNT(*) AS n FROM users').get()).n,
+    listings: (await db.prepare('SELECT COUNT(*) AS n FROM listings').get()).n,
+    rentals: (await db.prepare('SELECT COUNT(*) AS n FROM rentals').get()).n,
+    reviews: (await db.prepare('SELECT COUNT(*) AS n FROM reviews').get()).n,
   };
 
   console.log('Seeded Shelf:', counts, `(${completed} completed rentals)`);

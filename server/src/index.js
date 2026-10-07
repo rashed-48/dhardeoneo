@@ -4,11 +4,11 @@ import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
 import helmet from 'helmet';
-import { db } from './db.js';
+import { db, initDb, DB_DESCRIPTION } from './db.js';
 import { seed } from './seed.js';
 import { attachUser } from './lib/auth.js';
 import {
-  COVERS_DIR, BUNDLED_COVERS_DIR, WEB_DIST, DB_PATH, IS_PRODUCTION, ensureDir,
+  COVERS_DIR, BUNDLED_COVERS_DIR, WEB_DIST, IS_PRODUCTION, ensureDir,
 } from './lib/paths.js';
 import { AREAS, CATEGORIES } from './lib/geo.js';
 import authRoutes from './routes/auth.js';
@@ -21,7 +21,7 @@ const PORT = Number(process.env.PORT || 4000);
 // A fresh host starts with an empty volume; without this the site would come
 // up with no books at all.
 async function seedIfEmpty() {
-  const { n } = db.prepare('SELECT COUNT(*) AS n FROM users').get();
+  const { n } = await db.prepare('SELECT COUNT(*) AS n FROM users').get();
   if (n > 0) return;
   console.log('[shelf] Empty database — seeding demo data.');
   await seed();
@@ -51,15 +51,15 @@ function hydrateCovers() {
  * The seed does this too, but it only runs once — this also repairs a database
  * that predates the cover art, or one seeded before a volume was hydrated.
  */
-function reattachCovers() {
-  const orphans = db.prepare("SELECT id FROM listings WHERE cover_url = ''").all();
+async function reattachCovers() {
+  const orphans = await db.prepare("SELECT id FROM listings WHERE cover_url = ''").all();
   if (orphans.length === 0) return;
 
   const update = db.prepare('UPDATE listings SET cover_url = ? WHERE id = ?');
   let linked = 0;
   for (const { id } of orphans) {
     if (!fs.existsSync(path.join(COVERS_DIR, `${id}.jpg`))) continue;
-    update.run(`/covers/${id}.jpg`, id);
+    await update.run(`/covers/${id}.jpg`, id);
     linked++;
   }
   if (linked) console.log(`[shelf] Linked ${linked} listing(s) to their cover art.`);
@@ -67,8 +67,10 @@ function reattachCovers() {
 
 // Order matters: covers must be in place before the seed looks for them.
 hydrateCovers();
+// The schema has to exist before anything queries it.
+await initDb();
 await seedIfEmpty();
-reattachCovers();
+await reattachCovers();
 
 // Hosts terminate TLS upstream, so trust their forwarding headers.
 app.set('trust proxy', 1);
@@ -108,14 +110,23 @@ app.use(attachUser);
 app.use('/covers', express.static(COVERS_DIR, { maxAge: '7d' }));
 app.use('/covers', (_req, res) => res.status(404).json({ error: 'No such cover.' }));
 
-app.get('/api/health', (_req, res) =>
-  res.json({
-    ok: true,
-    service: 'shelf',
-    env: IS_PRODUCTION ? 'production' : 'development',
-    books: db.prepare("SELECT COUNT(*) AS n FROM listings WHERE status='available'").get().n,
-  })
-);
+app.get('/api/health', async (_req, res) => {
+  // The health check doubles as a database probe, so a failure here should
+  // report unhealthy rather than hang the platform's checker.
+  try {
+    const { n } = await db
+      .prepare("SELECT COUNT(*) AS n FROM listings WHERE status='available'")
+      .get();
+    res.json({
+      ok: true,
+      service: 'shelf',
+      env: IS_PRODUCTION ? 'production' : 'development',
+      books: n,
+    });
+  } catch {
+    res.status(503).json({ ok: false, service: 'shelf', error: 'database unavailable' });
+  }
+});
 app.get('/api/config', (_req, res) =>
   res.json({ areas: AREAS, categories: CATEGORIES, currency: '৳' })
 );
@@ -153,7 +164,7 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`[shelf] listening on :${PORT}`);
-  console.log(`[shelf] database ${DB_PATH}`);
+  console.log(`[shelf] database ${DB_DESCRIPTION}`);
   console.log(`[shelf] covers   ${COVERS_DIR}`);
   console.log(`[shelf] web      ${hasWebBuild ? WEB_DIST : 'served by Vite (dev)'}`);
 });
