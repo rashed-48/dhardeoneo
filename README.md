@@ -24,6 +24,10 @@ npm test         # unit + API tests
 For `DATABASE_URL`, the container above is `postgres://shelf:devpass@localhost:5433/shelf`.
 Any Postgres works — a local install or a hosted one such as Neon.
 
+`server/.env` is loaded automatically by the npm scripts (Node's own
+`--env-file-if-exists`, so no dotenv dependency and no failure when the file is absent).
+It is gitignored; in production the host injects these variables instead.
+
 Then open <http://localhost:5173>.
 
 Demo account: **ayesha@shelf.app** / **password123** (the login screen has a
@@ -242,7 +246,8 @@ anything missing falls back to generated art.
 | `SHELF_DB_POOL` | no | Max pooled connections. Defaults to 10. |
 | `SHELF_WEB_DIST` | no | Direct path override. |
 
-Copy [.env.example](.env.example) to `.env` for local overrides.
+Copy [.env.example](.env.example) to `server/.env` for local development — the npm scripts
+load it automatically. It is gitignored, so secrets stay out of the repository.
 
 **If `SHELF_SECRET` is unset in production the app still boots**, but generates a random
 secret per process and warns — so nobody can forge a token with a known default, at the cost

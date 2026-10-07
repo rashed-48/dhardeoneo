@@ -12,7 +12,7 @@
     "build": "npm --prefix web install && npm --prefix web run build",
     "covers": "npm --prefix server run covers",
     "test": "npm --prefix server test",
-    "start": "node server/src/index.js",
+    "start": "node --env-file-if-exists=server/.env server/src/index.js",
     "preview": "node scripts/preview.js",
     "test:browser": "node test/browser.mjs",
     "test:all": "npm test && npm run test:browser",
