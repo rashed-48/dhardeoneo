@@ -1,6 +1,6 @@
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
-import { AppProvider } from './store/AppContext';
+import { AppProvider, useApp } from './store/AppContext';
 import Header from './components/Header';
 import Home from './pages/Home';
 import Browse from './pages/Browse';
@@ -8,7 +8,25 @@ import BookDetail from './pages/BookDetail';
 import Auth from './pages/Auth';
 import ListBook from './pages/ListBook';
 import Dashboard from './pages/Dashboard';
-import { Empty } from './components/ui';
+import { Empty, Loading } from './components/ui';
+
+/**
+ * Signed-in pages re-check the session when they are opened. The page renders
+ * straight away on an optimistic session, so there is no flash of loading; if
+ * the check comes back unauthorised, AppContext redirects to the login screen.
+ */
+function Protected({ children }) {
+  const { user, booting, verifySession } = useApp();
+  const { pathname } = useLocation();
+
+  useEffect(() => {
+    if (!booting && user) verifySession();
+  }, [pathname, booting, user, verifySession]);
+
+  if (booting) return <Loading />;
+  if (!user) return <Navigate to="/login" replace state={{ from: pathname }} />;
+  return children;
+}
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -63,9 +81,9 @@ export default function App() {
               <Route path="/book/:id" element={<BookDetail />} />
               <Route path="/login" element={<Auth mode="login" />} />
               <Route path="/signup" element={<Auth mode="signup" />} />
-              <Route path="/lend" element={<ListBook />} />
-              <Route path="/lend/:id" element={<ListBook />} />
-              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/lend" element={<Protected><ListBook /></Protected>} />
+              <Route path="/lend/:id" element={<Protected><ListBook /></Protected>} />
+              <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
               <Route
                 path="*"
                 element={

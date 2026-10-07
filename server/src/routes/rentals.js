@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db.js';
 import { requireAuth } from '../lib/auth.js';
 import { charge, refund, payout } from '../lib/payments.js';
+import { rateLimit } from '../lib/rateLimit.js';
 
 const router = Router();
 
@@ -20,7 +21,26 @@ const addDays = (iso, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+export const isDate = (value) => {
+  const date = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === date;
+};
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+function transaction(fn) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
 
 const RENTAL_SELECT = `
   SELECT rt.*,
@@ -117,7 +137,7 @@ const recordPayment = db.prepare(
 const loadRental = (id) => db.prepare(RENTAL_SELECT + ' WHERE rt.id = ?').get(id);
 
 /** POST /api/rentals — borrower requests a book for N days. */
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 30 }), (req, res) => {
   const { listingId, startDate, days, message = '' } = req.body || {};
 
   const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(listingId));
@@ -133,7 +153,11 @@ router.post('/', requireAuth, (req, res) => {
       error: `Choose between ${listing.min_days} and ${listing.max_days} days.`,
     });
 
-  const start = isDate(startDate) ? startDate : new Date().toISOString().slice(0, 10);
+  if (startDate != null && !isDate(startDate))
+    return res.status(400).json({ error: 'Choose a real start date.' });
+  const start = startDate || todayISO();
+  if (start < todayISO())
+    return res.status(400).json({ error: 'The start date cannot be in the past.' });
   const end = addDays(start, n);
 
   const clash = db
@@ -205,7 +229,7 @@ router.get('/', requireAuth, (req, res) => {
  * POST /api/rentals/:id/pay — borrower settles the bill once the lender accepts.
  * The card details are passed straight to the gateway; only brand and last4 persist.
  */
-router.post('/:id/pay', requireAuth, (req, res) => {
+router.post('/:id/pay', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 10 }), (req, res) => {
   const rental = db.prepare('SELECT * FROM rentals WHERE id = ?').get(Number(req.params.id));
   if (!rental) return res.status(404).json({ error: 'Rental not found.' });
   if (rental.borrower_id !== req.user.id)
@@ -223,15 +247,18 @@ router.post('/:id/pay', requireAuth, (req, res) => {
     amount: rental.total,
   });
 
-  recordPayment.run(
-    rental.id, rental.borrower_id, null, 'rental', rental.total,
-    result.ok ? 'succeeded' : 'failed', 'card',
-    result.brand, result.last4, result.reference, result.failureReason
-  );
+  transaction(() => {
+    recordPayment.run(
+      rental.id, rental.borrower_id, null, 'rental', rental.total,
+      result.ok ? 'succeeded' : 'failed', 'card',
+      result.brand, result.last4, result.reference, result.failureReason
+    );
+    if (result.ok)
+      db.prepare("UPDATE rentals SET paid_at = datetime('now') WHERE id = ? AND paid_at IS NULL")
+        .run(rental.id);
+  });
 
   if (!result.ok) return res.status(402).json({ error: result.failureReason });
-
-  db.prepare("UPDATE rentals SET paid_at = datetime('now') WHERE id = ?").run(rental.id);
 
   const fresh = loadRental(rental.id);
   res.json({ rental: present(fresh, req.user.id, paymentsFor(rental.id)) });
@@ -278,39 +305,73 @@ const TRANSITIONS = {
   // Either side can walk away before handover — including a lender whose
   // borrower accepted but never paid.
   cancel: { from: ['requested', 'approved'], to: 'cancelled', by: 'either' },
+  settle: { from: ['returned'], to: 'returned', by: 'lender', requiresPaid: true },
 };
 
 /** Returning the book releases the deposit to the borrower and the rent to the lender. */
 function settle(rental) {
-  if (rental.settled_at || !rental.paid_at) return;
+  if (rental.settled_at || !rental.paid_at) return Boolean(rental.settled_at);
 
-  if (rental.deposit > 0) {
-    const r = refund({ amount: rental.deposit });
-    recordPayment.run(
-      rental.id, null, rental.borrower_id, 'deposit_refund', rental.deposit,
-      r.ok ? 'succeeded' : 'failed', 'card', '', '', r.reference, r.failureReason
-    );
+  const previous = new Set(
+    db.prepare("SELECT kind FROM payments WHERE rental_id = ? AND status = 'succeeded'")
+      .all(rental.id).map((row) => row.kind)
+  );
+  const attempts = [];
+  let depositOk = rental.deposit === 0 || previous.has('deposit_refund');
+  let payoutOk = previous.has('payout');
+
+  if (!depositOk) {
+    const result = refund({ amount: rental.deposit });
+    attempts.push([rental.borrower_id, 'deposit_refund', rental.deposit, result, 'card']);
+    depositOk = result.ok;
   }
 
   // The platform keeps the service fee; the lender receives the rent.
-  const p = payout({ amount: rental.subtotal });
-  recordPayment.run(
-    rental.id, null, rental.owner_id, 'payout', rental.subtotal,
-    p.ok ? 'succeeded' : 'failed', 'transfer', '', '', p.reference, p.failureReason
-  );
+  if (!payoutOk) {
+    const result = payout({ amount: rental.subtotal });
+    attempts.push([rental.owner_id, 'payout', rental.subtotal, result, 'transfer']);
+    payoutOk = result.ok;
+  }
 
-  db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ?").run(rental.id);
+  const complete = depositOk && payoutOk;
+  transaction(() => {
+    for (const [payeeId, kind, amount, result, method] of attempts) {
+      recordPayment.run(
+        rental.id, null, payeeId, kind, amount, result.ok ? 'succeeded' : 'failed', method,
+        '', '', result.reference, result.failureReason
+      );
+    }
+    if (complete)
+      db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ? AND settled_at IS NULL")
+        .run(rental.id);
+  });
+  return complete;
 }
 
 /** Cancelling a paid rental returns everything the borrower handed over. */
 function refundCancellation(rental) {
-  if (!rental.paid_at || rental.settled_at) return;
+  if (!rental.paid_at || rental.settled_at) return Boolean(rental.settled_at);
+  const alreadyRefunded = db.prepare(
+    "SELECT id FROM payments WHERE rental_id = ? AND kind = 'cancellation_refund' AND status = 'succeeded'"
+  ).get(rental.id);
+  if (alreadyRefunded) {
+    transaction(() => {
+      db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ? AND settled_at IS NULL")
+        .run(rental.id);
+    });
+    return true;
+  }
   const r = refund({ amount: rental.total });
-  recordPayment.run(
-    rental.id, null, rental.borrower_id, 'cancellation_refund', rental.total,
-    r.ok ? 'succeeded' : 'failed', 'card', '', '', r.reference, r.failureReason
-  );
-  db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ?").run(rental.id);
+  transaction(() => {
+    recordPayment.run(
+      rental.id, null, rental.borrower_id, 'cancellation_refund', rental.total,
+      r.ok ? 'succeeded' : 'failed', 'card', '', '', r.reference, r.failureReason
+    );
+    if (r.ok)
+      db.prepare("UPDATE rentals SET settled_at = datetime('now') WHERE id = ? AND settled_at IS NULL")
+        .run(rental.id);
+  });
+  return r.ok;
 }
 
 router.post('/:id/:action', requireAuth, (req, res) => {
@@ -340,13 +401,18 @@ router.post('/:id/:action', requireAuth, (req, res) => {
     ).run(rental.listing_id, rental.id, rental.start_date, rental.end_date);
   }
 
-  db.prepare('UPDATE rentals SET status = ? WHERE id = ?').run(rule.to, rental.id);
+  if (req.params.action !== 'settle')
+    db.prepare('UPDATE rentals SET status = ? WHERE id = ?').run(rule.to, rental.id);
 
-  if (rule.to === 'returned') settle({ ...rental, status: 'returned' });
-  if (rule.to === 'cancelled') refundCancellation(rental);
+  let settlementComplete = true;
+  if (rule.to === 'returned') settlementComplete = settle({ ...rental, status: 'returned' });
+  if (rule.to === 'cancelled') settlementComplete = refundCancellation(rental);
 
   const fresh = loadRental(rental.id);
-  res.json({ rental: present(fresh, req.user.id, paymentsFor(rental.id)) });
+  res.status(settlementComplete ? 200 : 202).json({
+    rental: present(fresh, req.user.id, paymentsFor(rental.id)),
+    warning: settlementComplete ? undefined : 'Settlement is pending. Retry it from the lender dashboard.',
+  });
 });
 
 export default router;

@@ -1,31 +1,28 @@
-const TOKEN_KEY = 'shelf.token';
+// Authentication uses a secure HttpOnly session cookie; no token is exposed to JavaScript.
 
-export const getToken = () => {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+/**
+ * The session can lapse while the app is open. These endpoints answer 401 as a
+ * normal result — signed out on boot, or wrong password — so they must not be
+ * mistaken for a session that just expired.
+ */
+const EXPECTS_401 = new Set(['/auth/me', '/auth/login', '/auth/signup', '/auth/logout']);
+
+let onUnauthorized = () => {};
+
+/** AppContext registers the handler that signs the user out and redirects. */
+export const setUnauthorizedHandler = (fn) => {
+  onUnauthorized = typeof fn === 'function' ? fn : () => {};
 };
 
-export const setToken = (t) => {
-  try {
-    t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    /* private mode — session-only auth is fine */
-  }
-};
-
-async function request(path, { method = 'GET', body, auth = true } = {}) {
+async function request(path, { method = 'GET', body } = {}) {
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
-  const token = auth ? getToken() : null;
-  if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(`/api${path}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
   });
 
   const text = await res.text();
@@ -33,6 +30,7 @@ async function request(path, { method = 'GET', body, auth = true } = {}) {
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
+    if (res.status === 401 && !EXPECTS_401.has(path.split('?')[0])) onUnauthorized();
     throw err;
   }
   return data;
@@ -49,21 +47,19 @@ const qs = (params) => {
 };
 
 export const api = {
-  config: () => request('/config', { auth: false }),
-
-  signup: (payload) => request('/auth/signup', { method: 'POST', body: payload, auth: false }),
-  login: (payload) => request('/auth/login', { method: 'POST', body: payload, auth: false }),
+  config: () => request('/config'),
+  signup: (payload) => request('/auth/signup', { method: 'POST', body: payload }),
+  login: (payload) => request('/auth/login', { method: 'POST', body: payload }),
+  logout: () => request('/auth/logout', { method: 'POST' }),
   me: () => request('/auth/me'),
   updateMe: (payload) => request('/auth/me', { method: 'PATCH', body: payload }),
-
   listings: (params) => request(`/listings${qs(params)}`),
   listingMeta: () => request('/listings/meta'),
-  coverLookup: (title, author) => request(`/listings/cover-lookup${qs({ title, author })}`),
+  coverLookup: (title, author, language) => request(`/listings/cover-lookup${qs({ title, author, language })}`),
   listing: (id, params) => request(`/listings/${id}${qs(params)}`),
   createListing: (payload) => request('/listings', { method: 'POST', body: payload }),
   updateListing: (id, payload) => request(`/listings/${id}`, { method: 'PATCH', body: payload }),
   deleteListing: (id) => request(`/listings/${id}`, { method: 'DELETE' }),
-
   rentals: (role) => request(`/rentals${qs({ role })}`),
   requestRental: (payload) => request('/rentals', { method: 'POST', body: payload }),
   rentalAction: (id, action) => request(`/rentals/${id}/${action}`, { method: 'POST' }),

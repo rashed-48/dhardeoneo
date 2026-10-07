@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
-import { api, setToken, getToken } from '../lib/api';
+import { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { api, setUnauthorizedHandler } from '../lib/api';
 
 const AppContext = createContext(null);
 const PLACE_KEY = 'shelf.place';
@@ -19,6 +20,7 @@ export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
   const [booting, setBooting] = useState(true);
   const [config, setConfig] = useState({ areas: [], categories: [], currency: '৳' });
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   // "Where am I searching from" — drives every distance shown in the app.
   const [place, setPlaceState] = useState(readPlace);
@@ -36,11 +38,50 @@ export function AppProvider({ children }) {
     api.config().then(setConfig).catch(() => {});
   }, []);
 
+  /**
+   * The session lapses after a spell of inactivity. Without this, the app would
+   * still look signed in and every action would fail with a bare error, so send
+   * the person to the login screen with a note and a way back.
+   */
+  const navigate = useNavigate();
+  const location = useLocation();
+  const here = useRef(location);
+  here.current = location;
+
+  const expireSession = useCallback(() => {
+    setSessionExpired(true);
+    setUser(null);
+
+    const { pathname, search } = here.current;
+    // Already on the login screen: keep whichever destination was saved first,
+    // or a later stray 401 would make the login screen redirect to itself.
+    if (pathname === '/login') return;
+
+    navigate('/login', { replace: true, state: { from: pathname + search } });
+  }, [navigate]);
+
   useEffect(() => {
-    if (!getToken()) {
-      setBooting(false);
-      return;
+    setUnauthorizedHandler(expireSession);
+    return () => setUnauthorizedHandler(null);
+  }, [expireSession]);
+
+  /**
+   * Opening a signed-in page is not enough to notice a lapsed session, because
+   * some of them fetch nothing on arrival. Protected routes call this so the
+   * check happens on entry rather than at the moment someone presses save.
+   */
+  const verifySession = useCallback(async () => {
+    try {
+      const { user: fresh } = await api.me();
+      setUser(fresh);
+      return true;
+    } catch (error) {
+      if (error.status === 401) expireSession();
+      return false;
     }
+  }, [expireSession]);
+
+  useEffect(() => {
     api
       .me()
       .then(({ user }) => {
@@ -49,14 +90,14 @@ export function AppProvider({ children }) {
           setPlace({ name: user.area || 'My area', lat: user.lat, lng: user.lng });
         }
       })
-      .catch(() => setToken(null))
+      .catch(() => {})
       .finally(() => setBooting(false));
   }, [setPlace]);
 
   const authenticate = useCallback(
     async (fn) => {
-      const { token, user } = await fn();
-      setToken(token);
+      const { user } = await fn();
+      setSessionExpired(false);
       setUser(user);
       if (user.lat != null && user.lng != null) {
         setPlace({ name: user.area || 'My area', lat: user.lat, lng: user.lng });
@@ -73,10 +114,14 @@ export function AppProvider({ children }) {
       config,
       place,
       setPlace,
+      verifySession,
+      sessionExpired,
+      dismissExpiredNotice: () => setSessionExpired(false),
       login: (payload) => authenticate(() => api.login(payload)),
       signup: (payload) => authenticate(() => api.signup(payload)),
       logout: () => {
-        setToken(null);
+        api.logout().catch(() => {});
+        setSessionExpired(false);
         setUser(null);
       },
       refreshUser: async () => {
@@ -85,7 +130,7 @@ export function AppProvider({ children }) {
         return user;
       },
     }),
-    [user, booting, config, place, setPlace, authenticate]
+    [user, booting, config, place, setPlace, authenticate, verifySession, sessionExpired]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

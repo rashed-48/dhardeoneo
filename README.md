@@ -10,6 +10,7 @@ leave a review.
 ```bash
 npm run setup    # installs everything, seeds the demo data, downloads cover art
 npm run dev      # API on :4000, web on :5173
+npm test         # unit + API tests (no server needed)
 ```
 
 Then open <http://localhost:5173>.
@@ -21,6 +22,37 @@ waiting to be paid for, so the checkout screen is one click away.
 Other scripts: `npm run seed` resets the demo data, `npm run covers` fills in missing cover
 art (`-- --all` re-fetches everything), `npm run build` builds the frontend, and
 `npm run dev:api` / `npm run dev:web` run one side only.
+
+## Tests
+
+```bash
+npm test            # unit + API integration — fast, needs nothing running
+npm run test:browser  # drives the production build in headless Chrome
+npm run test:all      # both
+```
+
+`npm test` runs two files. [`core.test.js`](server/test/core.test.js) unit-tests the pure
+rules — the payment simulator, quote arithmetic, calendar dates, distance, and the
+session-refresh decision. [`api.test.js`](server/test/api.test.js) boots the real server in a
+child process against a throwaway database on a spare port and exercises the HTTP API, so it
+needs no running server and never touches development data.
+
+The rental and payment state machine is the part of this app most expensive to get wrong, so
+it is covered transition by transition: payment is refused before acceptance, handover is
+refused before payment, return is refused before handover, a declined card leaves the rental
+untouched, paying twice is refused, settlement pays the deposit and the rent exactly once and
+is safe to retry, cancelling a paid rental refunds everything, and every action is scoped to
+the two people involved. Each test publishes its own book rather than competing over seeded
+stock, and sessions are reused so the suite stays inside the production rate limits.
+
+[`test/browser.mjs`](test/browser.mjs) covers what only a real browser shows: that the session
+cookie is unreachable from JavaScript, that checkout survives a declined card and then
+succeeds, that a lapsed session redirects to login with an explanation and returns you to the
+page you wanted, and that neither signed-out browsing nor a wrong password is mistaken for an
+expiry. It skips with a message if Chrome is not installed (`CHROME_PATH` overrides the
+lookup), and removes its profile directory afterwards.
+
+Not yet present: linting and type checking.
 
 ## How the product works
 
@@ -42,7 +74,8 @@ art (`-- --all` re-fetches everything), `npm run build` builds the frontend, and
 4. The rent lands as a payout; the deposit goes back to the borrower automatically.
 
 **Privacy.** Phone numbers are stripped from API responses until the lender accepts. Only the
-area and the distance are ever public — never a street address.
+area and distance are public; exact listing coordinates stay server-side. Shelf does not collect a
+street address, so borrower and lender agree the precise pickup point after acceptance.
 
 **Reviews.** Only the borrower on a rental that reached `returned` can review it, and only
 once. That means every rating on the site comes from a completed loan.
@@ -63,7 +96,8 @@ See `score()` in [server/src/routes/listings.js](server/src/routes/listings.js).
 
 Money is modelled as an append-only ledger. Rentals never store a balance — every figure the
 UI shows (paid, refunded, paid out) is derived from the `payments` table, so the numbers
-cannot drift from what actually happened.
+cannot drift from what actually happened. Database triggers reject ledger updates and deletes in
+normal operation; the development seed temporarily unlocks them only while resetting demo data.
 
 | When | Row written | Who |
 |---|---|---|
@@ -96,6 +130,11 @@ Card numbers are passed straight to the gateway and never persisted — only the
 four digits are stored. To go live, swap `charge`/`refund`/`payout` for a real PSP (Stripe,
 SSLCOMMERZ, bKash) and keep the return shape; nothing above that file changes. A production
 integration would also tokenise the card in the browser so the PAN never reaches this server.
+
+This repository intentionally remains a **demo**: the bundled gateway does not move money and
+requires no paid account. Do not collect real card details or present this checkout as real until
+a tokenising payment provider, provider idempotency keys, webhook reconciliation, and payout
+onboarding are in place.
 
 ## Cover art
 
@@ -168,6 +207,7 @@ demo data on restart — fine for showing the thing off, not for real users.
 | `PORT` | no | Injected by most hosts. Defaults to 4000. |
 | `SHELF_DATA_DIR` | no | Where the database lives. Set to your volume mount, e.g. `/data`. |
 | `SHELF_COVERS_DIR` | no | Point at the volume to keep lender-fetched covers across deploys. |
+| `SHELF_SESSION_IDLE_MINUTES` | no | Inactivity timeout, 1–1440. Defaults to 30. |
 | `SHELF_DB`, `SHELF_WEB_DIST` | no | Direct path overrides. |
 
 Copy [.env.example](.env.example) to `.env` for local overrides.
@@ -182,7 +222,25 @@ Helmet security headers with a CSP tuned for the app's own assets and Google Fon
 compression (the listings payload drops 19 kB → 4 kB), `trust proxy` for hosts that
 terminate TLS upstream, immutable caching on hashed assets with `no-cache` on `index.html`,
 SPA history fallback that does not swallow `/api` or `/covers` 404s, and a
-`/api/health` endpoint wired to both the Docker healthcheck and the platform configs.
+`/api/health` endpoint wired to both the Docker healthcheck and the platform configs. Sessions
+are HttpOnly, SameSite cookies rather than JavaScript-readable tokens; login, signup, payment,
+rental-request and cover-lookup endpoints have in-process rate limits.
+
+### Sessions
+
+The session times out on **inactivity**, not on a fixed clock. The cookie is reissued while
+someone is using the site, so nobody is signed out mid-task, and it lapses 30 minutes after
+they stop. A `sat` claim records the original sign-in so the sliding cannot continue past an
+absolute 7-day cap — a stolen cookie cannot be kept alive forever. Only `/api` requests slide
+it, because a `Set-Cookie` on an immutable asset response would stop caches storing it.
+
+When the session does lapse, the client notices in two places: any 401 from a non-auth
+endpoint, and a re-check whenever a signed-in page is opened (some of them fetch nothing on
+arrival, so waiting for a request would strand the person on a form that looks fine until
+they press save). Either way they land on the login screen with an explanation and are
+returned to the page they were on.
+
+`SHELF_SESSION_IDLE_MINUTES` overrides the 30-minute window (1 to 1440).
 
 Requires **Node 24+** — `node:sqlite` needs `--experimental-sqlite` before then, which is
 why the image is pinned to `node:24-slim`.
@@ -192,11 +250,11 @@ why the image is pinned to `node:24-slim`.
 | | |
 |---|---|
 | Backend | Node + Express, SQLite via the built-in `node:sqlite` — no native module to compile |
-| Auth | JWT, passwords hashed with `scrypt` from `node:crypto` |
+| Auth | Short-lived HttpOnly JWT cookie, passwords hashed with `scrypt` from `node:crypto` |
 | Frontend | React 19 + Vite + React Router, Tailwind v4 |
 | Distance | Haversine from the borrower's chosen origin, computed per request |
 
-Three dependencies on the server (`express`, `cors`, `jsonwebtoken`). The database is a single
+Five dependencies on the server (`express`, `cors`, `compression`, `helmet`, `jsonwebtoken`). The database is a single
 file, `server/shelf.db`, created on first run and migrated forward on boot.
 
 ## Layout
@@ -208,16 +266,16 @@ server/src/
   seed.js               10 lenders, 34 books, ~70 rentals, 54 reviews, full ledger
   covers.js             `npm run covers` — bulk cover fetch
   lib/geo.js            haversine, known areas, categories
-  lib/auth.js           hashing, JWT, requireAuth
+  lib/auth.js           password hashing, cookie-session JWT, requireAuth
   lib/payments.js       the simulated card gateway
   lib/openlibrary.js    cover search + download
-  routes/auth.js        signup, login, me
+  routes/auth.js        signup, login, logout, me
   routes/listings.js    search, filtering, ranking, listing CRUD, cover lookup
   routes/rentals.js     request -> accept -> pay -> handover -> return, refunds, reviews
 
 web/src/
   store/AppContext.jsx      session + the location everything is measured from
-  lib/api.js                fetch wrapper, token handling
+  lib/api.js                cookie-aware fetch wrapper
   components/BookCover.jsx  real jacket, or generated art as a fallback
   components/CheckoutSheet.jsx  card entry and the bill
   pages/                    Home, Browse, BookDetail, Auth, ListBook, Dashboard

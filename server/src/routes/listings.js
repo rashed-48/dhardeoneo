@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { db } from '../db.js';
 import { requireAuth } from '../lib/auth.js';
-import { distanceKm, CATEGORIES } from '../lib/geo.js';
+import { distanceKm, CATEGORIES, AREAS } from '../lib/geo.js';
 import { cacheCoverFor } from '../lib/openlibrary.js';
+import { rateLimit } from '../lib/rateLimit.js';
 
 const router = Router();
 
@@ -17,7 +18,8 @@ const BASE_SELECT = `
     (SELECT ROUND(AVG(r.rating), 2) FROM reviews r WHERE r.owner_id  = l.owner_id) AS owner_rating,
     (SELECT COUNT(*)                FROM reviews r WHERE r.owner_id  = l.owner_id) AS owner_review_count,
     (SELECT COUNT(*) FROM rentals rt
-       WHERE rt.listing_id = l.id AND rt.status IN ('approved','active')) AS active_rentals
+       WHERE rt.listing_id = l.id AND rt.status IN ('approved','active')) AS active_rentals,
+    (SELECT COUNT(*) FROM rentals rt WHERE rt.listing_id = l.id) AS rental_count
   FROM listings l
   JOIN users u ON u.id = l.owner_id
 `;
@@ -39,13 +41,14 @@ export function present(row, origin) {
     minDays: row.min_days,
     maxDays: row.max_days,
     area: row.area,
-    lat: row.lat,
-    lng: row.lng,
     status: row.status,
     createdAt: row.created_at,
     rating: row.rating,
     reviewCount: row.review_count,
     lentOut: row.active_rentals > 0,
+    // Any rental at all pins the listing in place, for the payment record.
+    timesRequested: row.rental_count,
+    canDelete: row.rental_count === 0,
     distanceKm: d == null ? null : Math.round(d * 10) / 10,
     owner: {
       id: row.owner_id,
@@ -87,12 +90,14 @@ router.get('/', (req, res) => {
     limit,
   } = req.query;
 
-  const where = ["l.status = 'available'"];
+  const showOwnerInventory =
+    Boolean(ownerId) && req.user?.id === Number(ownerId) && String(req.query.includeOwn) === 'true';
+  const where = showOwnerInventory ? ['1 = 1'] : ["l.status = 'available'"];
   const params = [];
 
   if (String(q).trim()) {
     where.push('(l.title LIKE ? OR l.author LIKE ? OR l.category LIKE ? OR l.description LIKE ?)');
-    const like = '%' + String(q).trim() + '%';
+    const like = '%' + String(q).trim().slice(0, 100) + '%';
     params.push(like, like, like, like);
   }
   if (category) {
@@ -130,7 +135,7 @@ router.get('/', (req, res) => {
   };
   items.sort(sorters[sort] || sorters.best);
 
-  if (limit) items = items.slice(0, Number(limit));
+  if (limit) items = items.slice(0, Math.min(100, Math.max(1, Math.round(Number(limit) || 100))));
 
   res.json({ count: items.length, items });
 });
@@ -165,7 +170,7 @@ router.get('/meta', (_req, res) => {
  * Finds real cover art for a book the lender is about to list and caches it
  * locally. Auth-gated because it makes an outbound request per call.
  */
-router.get('/cover-lookup', requireAuth, async (req, res) => {
+router.get('/cover-lookup', requireAuth, rateLimit({ windowMs: 15 * 60_000, max: 20 }), async (req, res) => {
   const title = String(req.query.title || '').trim();
   const author = String(req.query.author || '').trim();
   const language = String(req.query.language || 'English');
@@ -245,19 +250,26 @@ const toBody = (l) => ({
   status: l.status,
 });
 
-/** Guards against `javascript:` and other unexpected schemes in an img src. */
+/**
+ * Only covers this server has cached may reach an <img src>, which rules out
+ * `javascript:` and any third-party host. An unusable value is rejected rather
+ * than quietly dropped, so nobody saves a listing believing the art stuck.
+ */
 function safeCoverUrl(value) {
-  const url = String(value || '').trim().slice(0, 500);
+  const url = String(value ?? '').trim().slice(0, 500);
   if (!url) return '';
   if (url.startsWith('/covers/')) return url;
-  if (/^https:\/\//i.test(url)) return url;
-  return '';
+  throw new Error('Use the cover finder — cover images must be hosted by Shelf.');
 }
 
-function listingPayload(body, user) {
+const LANGUAGES = new Set(['English', 'Bangla', 'Other']);
+const CONDITIONS = new Set(['Like new', 'Good', 'Fair']);
+
+function listingPayload(body, user, { existingCover = null } = {}) {
   const title = String(body.title || '').trim();
   const author = String(body.author || '').trim();
-  if (!title || !author) throw new Error('Title and author are required.');
+  if (!title || !author || title.length > 200 || author.length > 200)
+    throw new Error('Title and author must be between 1 and 200 characters.');
 
   const pricePerDay = clampInt(body.pricePerDay, 1, 10000, NaN);
   if (!Number.isFinite(pricePerDay)) throw new Error('Set a valid price per day.');
@@ -265,21 +277,33 @@ function listingPayload(body, user) {
   const minDays = clampInt(body.minDays, 1, 365, 3);
   const maxDays = Math.max(minDays, clampInt(body.maxDays, 1, 365, 30));
 
+  const category = String(body.category || 'Fiction');
+  const language = String(body.language || 'English');
+  const condition = String(body.condition || 'Good');
+  if (!CATEGORIES.includes(category) || !LANGUAGES.has(language) || !CONDITIONS.has(condition))
+    throw new Error('Choose a valid category, language and condition.');
+
+  const area = AREAS.find((candidate) => candidate.name === String(body.area || user.area || ''));
+  if (!area) throw new Error('Pick a valid pickup area for this book.');
+
   return {
     title,
     author,
-    category: String(body.category || 'Fiction'),
-    language: String(body.language || 'English'),
-    condition: String(body.condition || 'Good'),
+    category,
+    language,
+    condition,
     description: String(body.description || '').slice(0, 2000),
-    coverUrl: safeCoverUrl(body.coverUrl),
+    coverUrl:
+      body.coverUrl === undefined && existingCover !== null
+        ? existingCover // already stored and validated; do not re-judge it
+        : safeCoverUrl(body.coverUrl),
     pricePerDay,
     deposit: clampInt(body.deposit, 0, 100000, 0),
     minDays,
     maxDays,
-    area: String(body.area || user.area || ''),
-    lat: Number(body.lat ?? user.lat),
-    lng: Number(body.lng ?? user.lng),
+    area: area.name,
+    lat: area.lat,
+    lng: area.lng,
     status: body.status === 'paused' ? 'paused' : 'available',
   };
 }
@@ -291,9 +315,6 @@ router.post('/', requireAuth, (req, res) => {
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
-  if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng))
-    return res.status(400).json({ error: 'Pick a pickup area for this book.' });
-
   const info = db
     .prepare(
       `INSERT INTO listings
@@ -319,7 +340,9 @@ router.patch('/:id', requireAuth, (req, res) => {
 
   let p;
   try {
-    p = listingPayload({ ...toBody(existing), ...(req.body || {}) }, req.user);
+    const merged = { ...toBody(existing), ...(req.body || {}) };
+    if (req.body?.coverUrl === undefined) delete merged.coverUrl;
+    p = listingPayload(merged, req.user, { existingCover: existing.cover_url });
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -346,12 +369,11 @@ router.delete('/:id', requireAuth, (req, res) => {
 
   const live = db
     .prepare(
-      `SELECT COUNT(*) AS n FROM rentals
-       WHERE listing_id = ? AND status IN ('requested','approved','active')`
+       `SELECT COUNT(*) AS n FROM rentals WHERE listing_id = ?`
     )
     .get(existing.id).n;
   if (live > 0)
-    return res.status(409).json({ error: 'Settle the open rentals on this book first.' });
+    return res.status(409).json({ error: 'Listings with rental history are kept for the payment record.' });
 
   db.prepare('DELETE FROM listings WHERE id = ?').run(existing.id);
   res.json({ ok: true });

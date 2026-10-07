@@ -5,10 +5,12 @@ import { Field, Alert, Spinner, Icon } from '../components/ui';
 
 export default function Auth({ mode }) {
   const isSignup = mode === 'signup';
-  const { login, signup, config } = useApp();
+  const { login, signup, config, sessionExpired } = useApp();
   const navigate = useNavigate();
   const location = useLocation();
-  const from = location.state?.from || '/';
+  const requested = location.state?.from;
+  const from = requested && !requested.startsWith('/login') ? requested : '/';
+  const expired = sessionExpired;
 
   const [form, setForm] = useState({
     name: '',
@@ -68,6 +70,14 @@ export default function Auth({ mode }) {
               : 'Log in to borrow and manage your shelf.'}
           </p>
 
+          {expired && !isSignup && (
+            <div className="mt-5">
+              <Alert tone="info">
+                You were signed out after a while away. Log in to pick up where you left off.
+              </Alert>
+            </div>
+          )}
+
           <form onSubmit={submit} className="mt-8 space-y-5">
             {isSignup && (
               <Field label="Full name">
@@ -79,14 +89,14 @@ export default function Auth({ mode }) {
               <input type="email" value={form.email} onChange={set('email')} className="input" required autoComplete="email" placeholder="you@example.com" />
             </Field>
 
-            <Field label="Password" hint={isSignup ? 'At least 6 characters' : undefined}>
+            <Field label="Password" hint={isSignup ? '10 to 256 characters' : undefined}>
               <input
                 type="password"
                 value={form.password}
                 onChange={set('password')}
                 className="input"
                 required
-                minLength={6}
+                minLength={10}
                 autoComplete={isSignup ? 'new-password' : 'current-password'}
                 placeholder="••••••••"
               />

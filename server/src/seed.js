@@ -85,12 +85,19 @@ const daysAgo = (n) => {
 const daysFromNow = (n) => daysAgo(-n);
 
 function reset() {
-  db.exec('PRAGMA foreign_keys = OFF');
-  for (const t of ['payments', 'reviews', 'rentals', 'listings', 'users']) {
-    db.exec(`DELETE FROM ${t}`);
-    db.exec(`DELETE FROM sqlite_sequence WHERE name = '${t}'`);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec("UPDATE app_meta SET value = '1' WHERE key = 'ledger_cleanup'");
+    for (const t of ['payments', 'reviews', 'rentals', 'listings', 'users']) {
+      db.exec(`DELETE FROM ${t}`);
+      db.exec(`DELETE FROM sqlite_sequence WHERE name = '${t}'`);
+    }
+    db.exec("UPDATE app_meta SET value = '0' WHERE key = 'ledger_cleanup'");
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
-  db.exec('PRAGMA foreign_keys = ON');
 }
 
 export function seed() {

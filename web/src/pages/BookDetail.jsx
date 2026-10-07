@@ -155,7 +155,7 @@ export default function BookDetail() {
                 </div>
                 <p className="mt-3 text-[14px] text-muted inline-flex items-start gap-2">
                   <Icon name="shield" className="w-4 h-4 mt-0.5 shrink-0" />
-                  Exact address and phone number are shared once the lender accepts your request.
+                  Their phone number is shared once the lender accepts. Arrange the exact pickup point together.
                 </p>
               </div>
             </div>

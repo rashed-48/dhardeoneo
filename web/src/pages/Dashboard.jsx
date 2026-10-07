@@ -37,7 +37,7 @@ export default function Dashboard() {
     api.rentals('borrower').then((r) => setBorrowing(r.items)).catch(() => setBorrowing([]));
     api.rentals('lender').then((r) => setLending(r.items)).catch(() => setLending([]));
     api
-      .listings({ ownerId: user.id, lat: place.lat, lng: place.lng })
+      .listings({ ownerId: user.id, includeOwn: true, lat: place.lat, lng: place.lng })
       .then((r) => setShelf(r.items))
       .catch(() => setShelf([]));
   }, [user, place.lat, place.lng]);
@@ -239,6 +239,8 @@ function RentalCard({ rental: r, role, onAct, onReview, onPay }) {
     if (r.status === 'approved' && !r.paidAt)
       actions.push(['Withdraw', 'cancel', 'btn-secondary btn-sm']);
     if (r.status === 'active') actions.push(['Mark returned', 'return', 'btn-primary btn-sm']);
+    if (r.status === 'returned' && r.paidAt && !r.settledAt)
+      actions.push(['Retry settlement', 'settle', 'btn-primary btn-sm']);
   } else {
     if (['requested', 'approved'].includes(r.status))
       actions.push(['Cancel request', 'cancel', 'btn-secondary btn-sm']);

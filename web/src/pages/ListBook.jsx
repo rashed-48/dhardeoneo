@@ -36,6 +36,8 @@ export default function ListBook() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [coverState, setCoverState] = useState({ busy: false, note: '' });
+  // A book that has ever been requested is kept for the payment record.
+  const [canDelete, setCanDelete] = useState(true);
 
   useEffect(() => {
     if (!booting && !user) navigate('/login', { state: { from: editing ? `/lend/${id}` : '/lend' } });
@@ -50,6 +52,7 @@ export default function ListBook() {
     api
       .listing(id)
       .then(({ listing }) => {
+        setCanDelete(listing.canDelete !== false);
         setForm({
           title: listing.title,
           author: listing.author,
@@ -103,7 +106,7 @@ export default function ListBook() {
     }
     setCoverState({ busy: true, note: '' });
     try {
-      const hit = await api.coverLookup(form.title.trim(), form.author.trim());
+      const hit = await api.coverLookup(form.title.trim(), form.author.trim(), form.language);
       setForm((f) => ({ ...f, coverUrl: hit.coverUrl }));
       setCoverState({ busy: false, note: `Matched “${hit.matchedTitle}”.` });
     } catch (e) {
@@ -237,7 +240,7 @@ export default function ListBook() {
 
             <section className="space-y-5 pt-8 border-t border-line">
               <h2 className="text-lg font-bold">Pickup</h2>
-              <Field label="Area" hint="Borrowers see the area and the distance — never your exact address.">
+              <Field label="Area" hint="Borrowers see the area and distance; agree the exact pickup point after acceptance.">
                 <select value={form.area} onChange={set('area')} className="input" required>
                   <option value="" disabled>Choose an area</option>
                   {config.areas.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
@@ -272,10 +275,17 @@ export default function ListBook() {
                 {busy ? <Spinner className="w-5 h-5" /> : editing ? 'Save changes' : 'Publish listing'}
               </button>
               <Link to="/dashboard" className="btn-secondary">Cancel</Link>
-              {editing && (
+              {editing && canDelete && (
                 <button type="button" onClick={remove} disabled={busy} className="btn-ghost text-muted ml-auto">
                   Remove listing
                 </button>
+              )}
+              {editing && !canDelete && (
+                <p className="ml-auto text-[13px] text-muted max-w-xs text-right leading-snug">
+                  This book has been borrowed before, so it stays on Shelf for the payment
+                  record. Set it to <span className="font-medium text-ink">Paused</span> to take
+                  it out of search.
+                </p>
               )}
             </div>
           </form>

@@ -94,6 +94,14 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- A small internal flag lets the development seed reset demo data while the
+-- normal application path keeps the payment ledger append-only.
+CREATE TABLE IF NOT EXISTS app_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+INSERT OR IGNORE INTO app_meta (key, value) VALUES ('ledger_cleanup', '0');
+
 CREATE INDEX IF NOT EXISTS idx_listings_owner    ON listings(owner_id);
 CREATE INDEX IF NOT EXISTS idx_listings_category ON listings(category);
 CREATE INDEX IF NOT EXISTS idx_rentals_borrower  ON rentals(borrower_id);
@@ -102,6 +110,22 @@ CREATE INDEX IF NOT EXISTS idx_rentals_listing   ON rentals(listing_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_listing   ON reviews(listing_id);
 CREATE INDEX IF NOT EXISTS idx_payments_rental   ON payments(rental_id);
 CREATE INDEX IF NOT EXISTS idx_payments_payee    ON payments(payee_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_one_success_per_kind
+  ON payments(rental_id, kind) WHERE status = 'succeeded';
+
+CREATE TRIGGER IF NOT EXISTS payments_no_update
+BEFORE UPDATE ON payments
+WHEN (SELECT value FROM app_meta WHERE key = 'ledger_cleanup') != '1'
+BEGIN
+  SELECT RAISE(ABORT, 'payments are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS payments_no_delete
+BEFORE DELETE ON payments
+WHEN (SELECT value FROM app_meta WHERE key = 'ledger_cleanup') != '1'
+BEGIN
+  SELECT RAISE(ABORT, 'payments are immutable');
+END;
 `);
 
 /** Brings a database created by an earlier version up to the current schema. */

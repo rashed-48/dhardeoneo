@@ -27,6 +27,30 @@ function resolveSecret() {
 }
 
 const SECRET = resolveSecret();
+const COOKIE_NAME = 'shelf_session';
+const CLAIMS = { issuer: 'shelf', audience: 'shelf-web' };
+
+/**
+ * Sessions time out on inactivity rather than on a fixed clock: the cookie is
+ * reissued while someone is using the site, so they are never signed out
+ * mid-task, and it lapses IDLE_WINDOW after they stop. ABSOLUTE_MAX caps how
+ * long that sliding can continue, so a stolen cookie cannot live forever.
+ */
+const idleMinutes = Number(process.env.SHELF_SESSION_IDLE_MINUTES);
+const IDLE_WINDOW_MS =
+  Number.isFinite(idleMinutes) && idleMinutes >= 1 && idleMinutes <= 60 * 24
+    ? idleMinutes * 60 * 1000
+    : 30 * 60 * 1000; // 30 minutes of inactivity
+const ABSOLUTE_MAX_MS = 7 * 24 * 60 * 60 * 1000; // 7 days since signing in
+const REFRESH_AFTER_MS = IDLE_WINDOW_MS / 2; // reissue past the halfway point
+
+const cookieOptions = () => ({
+  httpOnly: true,
+  secure: IS_PRODUCTION,
+  sameSite: 'lax',
+  path: '/',
+  maxAge: IDLE_WINDOW_MS,
+});
 
 export function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -42,24 +66,85 @@ export function verifyPassword(password, stored) {
   return candidate.length === known.length && crypto.timingSafeEqual(candidate, known);
 }
 
-export const signToken = (user) =>
-  jwt.sign({ uid: user.id }, SECRET, { expiresIn: '30d' });
+/**
+ * `sat` (session started at) survives every refresh, so the absolute cap is
+ * measured from the original sign-in rather than from the latest reissue.
+ */
+export const signToken = (user, sessionStartedAt = Date.now()) =>
+  jwt.sign({ uid: user.id, sat: sessionStartedAt }, SECRET, {
+    ...CLAIMS,
+    expiresIn: Math.floor(IDLE_WINDOW_MS / 1000),
+  });
+
+export function setSession(res, user, sessionStartedAt) {
+  res.cookie(COOKIE_NAME, signToken(user, sessionStartedAt), cookieOptions());
+}
+
+export function clearSession(res) {
+  const { maxAge, ...options } = cookieOptions();
+  res.clearCookie(COOKIE_NAME, options);
+}
+
+/**
+ * True once a session is past the halfway point of its idle window, unless it
+ * has already slid for longer than the absolute cap allows. Pure, so the rule
+ * can be tested without waiting half an hour.
+ *
+ * @param {{startedAt: number, expiresAt: number}} session
+ */
+export function shouldRefresh({ startedAt, expiresAt }, now = Date.now()) {
+  if (now >= expiresAt) return false; // already lapsed; let it go
+  if (now - startedAt >= ABSOLUTE_MAX_MS) return false;
+  const elapsed = IDLE_WINDOW_MS - (expiresAt - now);
+  return elapsed >= REFRESH_AFTER_MS;
+}
+
+export const SESSION_LIMITS = {
+  idleWindowMs: IDLE_WINDOW_MS,
+  absoluteMaxMs: ABSOLUTE_MAX_MS,
+  refreshAfterMs: REFRESH_AFTER_MS,
+};
+
+function readCookie(req, name) {
+  const pairs = String(req.headers.cookie || '').split(';');
+  for (const pair of pairs) {
+    const [key, ...value] = pair.trim().split('=');
+    if (key === name) return decodeURIComponent(value.join('='));
+  }
+  return null;
+}
 
 function userFromRequest(req) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = readCookie(req, COOKIE_NAME);
   if (!token) return null;
   try {
-    const { uid } = jwt.verify(token, SECRET);
-    return db.prepare('SELECT * FROM users WHERE id = ?').get(uid) || null;
+    const claims = jwt.verify(token, SECRET, { ...CLAIMS, algorithms: ['HS256'] });
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(claims.uid);
+    if (!user) return null;
+
+    // Tokens issued before `sat` existed are treated as starting now; they
+    // still expire on the idle window, they just get one more sliding period.
+    const startedAt = Number(claims.sat) || Date.now();
+    return { user, startedAt, expiresAt: claims.exp * 1000 };
   } catch {
     return null;
   }
 }
 
-/** Attaches req.user when a valid token is present, but never rejects. */
-export function attachUser(req, _res, next) {
-  req.user = userFromRequest(req);
+/**
+ * Attaches req.user when a valid cookie is present, and slides the session
+ * forward once it is past the halfway mark — never rejects.
+ */
+export function attachUser(req, res, next) {
+  const session = userFromRequest(req);
+  req.user = session?.user ?? null;
+  if (!session) return next();
+
+  // Only API traffic slides the session. Putting Set-Cookie on an immutable
+  // asset response would stop caches storing it.
+  if (!req.path.startsWith('/api')) return next();
+
+  if (shouldRefresh(session)) setSession(res, session.user, session.startedAt);
   next();
 }
 
