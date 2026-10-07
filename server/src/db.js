@@ -43,6 +43,16 @@ function requireConnection() {
  * on a container network usually has none. An explicit sslmode in the URL
  * always wins, so a host that disagrees with the guess can say so.
  */
+/**
+ * Verify the server's certificate. Encryption without verification still lets
+ * anything between here and the database present its own certificate and read
+ * the traffic, and the managed providers all serve publicly trusted ones.
+ * SHELF_DB_SSL_INSECURE exists only for a host with a self-signed certificate.
+ */
+const VERIFIED_TLS = {
+  rejectUnauthorized: process.env.SHELF_DB_SSL_INSECURE !== '1',
+};
+
 const DIRECT_HOSTS = new Set([
   'localhost',
   '127.0.0.1',
@@ -57,12 +67,13 @@ function sslSetting() {
   try {
     url = new URL(CONNECTION);
   } catch {
-    return { rejectUnauthorized: false };
+    return VERIFIED_TLS;
   }
+
   const mode = url.searchParams.get('sslmode');
   if (mode === 'disable') return false;
-  if (mode) return { rejectUnauthorized: false };
-  return DIRECT_HOSTS.has(url.hostname) ? false : { rejectUnauthorized: false };
+  if (mode) return VERIFIED_TLS;
+  return DIRECT_HOSTS.has(url.hostname) ? false : VERIFIED_TLS;
 }
 
 export const pool = new Pool({

@@ -244,6 +244,7 @@ anything missing falls back to generated art.
 | `SHELF_COVERS_DIR` | no | Point at a volume to keep covers fetched after deploy. |
 | `SHELF_SESSION_IDLE_MINUTES` | no | Inactivity timeout, 1–1440. Defaults to 30. |
 | `SHELF_DB_POOL` | no | Max pooled connections. Defaults to 10. |
+| `SHELF_DB_SSL_INSECURE` | no | `1` skips database certificate verification. Only for a self-signed host. |
 | `SHELF_WEB_DIST` | no | Direct path override. |
 
 Copy [.env.example](.env.example) to `server/.env` for local development — the npm scripts
