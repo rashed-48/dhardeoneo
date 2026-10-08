@@ -24,7 +24,16 @@ const USERS = [
   ['Zayan Mahmud', 'zayan@shelf.app', '+8801711000010', 'Badda', 'Self-help and productivity. Ironically never on time.'],
 ];
 
-// title, author, category, language, condition, pricePerDay, deposit, minDays, maxDays, ownerIdx, description
+/**
+ * A seeded book. The columns are positional, so the tuple is written out:
+ * @typedef {[
+ *   title: string, author: string, category: string, language: string,
+ *   condition: string, pricePerDay: number, deposit: number, minDays: number,
+ *   maxDays: number, ownerIdx: number, description: string
+ * ]} SeedBook
+ */
+
+/** @type {SeedBook[]} */
 export const BOOKS = [
   ['Sapiens', 'Yuval Noah Harari', 'History', 'English', 'Like new', 18, 400, 3, 21, 0, 'Hardcover, no marks. One of my favourite reads, glad to pass it around.'],
   ['Atomic Habits', 'James Clear', 'Self-help', 'English', 'Good', 15, 300, 3, 14, 9, 'Slight crease on the spine. Highlighted a few lines in pencil, erasable.'],

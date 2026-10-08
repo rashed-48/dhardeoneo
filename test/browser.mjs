@@ -248,8 +248,12 @@ async function main() {
   await evaluate(`[...document.querySelectorAll('a')].find(a => a.getAttribute('href') === '/lend')?.click()`);
   check('an expired session redirects to login', await waitFor("location.pathname === '/login'"),
     `path=${await evaluate('location.pathname')}`);
-  check('the login screen explains why',
-    /signed out after a while away/i.test(await evaluate('document.body.innerText')));
+  // The path changes a render before the notice appears, so wait for the text
+  // rather than reading it the instant the URL updates.
+  check(
+    'the login screen explains why',
+    await waitFor(`/signed out after a while away/i.test(document.body.innerText)`)
+  );
 
   await typeInto('input[type=email]', 'ayesha@shelf.app');
   await typeInto('input[type=password]', 'password123');

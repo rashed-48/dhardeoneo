@@ -128,7 +128,9 @@ async function userFromRequest(req) {
   const token = readCookie(req, COOKIE_NAME);
   if (!token) return null;
   try {
-    const claims = jwt.verify(token, SECRET, { ...CLAIMS, algorithms: ['HS256'] });
+    const claims = /** @type {import('jsonwebtoken').JwtPayload} */ (
+      jwt.verify(token, SECRET, { ...CLAIMS, algorithms: ['HS256'] })
+    );
     const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(claims.uid);
     if (!user) return null;
 

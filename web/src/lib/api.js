@@ -14,6 +14,10 @@ export const setUnauthorizedHandler = (fn) => {
   onUnauthorized = typeof fn === 'function' ? fn : () => {};
 };
 
+/**
+ * @param {string} path
+ * @param {{ method?: string, body?: unknown }} [options]
+ */
 async function request(path, { method = 'GET', body } = {}) {
   const headers = {};
   if (body) headers['Content-Type'] = 'application/json';
@@ -28,7 +32,10 @@ async function request(path, { method = 'GET', body } = {}) {
   const text = await res.text();
   const data = text ? JSON.parse(text) : {};
   if (!res.ok) {
-    const err = new Error(data.error || `Request failed (${res.status})`);
+    // Carries the HTTP status so callers can tell a 401 from a 500.
+    const err = /** @type {Error & { status?: number }} */ (
+      new Error(data.error || `Request failed (${res.status})`)
+    );
     err.status = res.status;
     if (res.status === 401 && !EXPECTS_401.has(path.split('?')[0])) onUnauthorized();
     throw err;

@@ -16,6 +16,32 @@ env:
   SHELF_TEST_DATABASE_URL: postgres://shelf:devpass@localhost:5432/shelf
 
 jobs:
+  quality:
+    name: lint + types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      # The type pass reads types from both workspaces, so both are installed.
+      - run: npm ci
+      - run: npm --prefix server ci
+      - run: npm --prefix web ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
   test:
     name: unit + API
     runs-on: ubuntu-latest

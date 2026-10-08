@@ -30,7 +30,7 @@ function locationFor(areaName) {
 }
 
 router.post('/signup', rateLimit({ windowMs: 15 * 60_000, max: 5 }), async (req, res) => {
-  const { name, email, password, phone = '', area = '', lat = null, lng = null } =
+  const { name, email, password, phone = '', area = '', _lat = null, _lng = null } =
     req.body || {};
 
   const cleanName = String(name || '').trim();
@@ -111,7 +111,7 @@ router.post('/logout', async (_req, res) => {
 router.get('/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
 
 router.patch('/me', requireAuth, async (req, res) => {
-  const { name, phone, area, lat, lng, bio } = req.body || {};
+  const { name, phone, area, _lat, _lng, bio } = req.body || {};
   const u = req.user;
   const nextName = name === undefined ? u.name : String(name).trim();
   const nextPhone = phone === undefined ? u.phone : String(phone).trim();

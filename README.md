@@ -91,7 +91,26 @@ Postgres service container, a second for the browser suite. The browser job fetc
 first, since it is not committed, and tolerates a bad day at Open Library rather than
 reporting a broken build.
 
-Not yet present: linting and type checking.
+```bash
+npm run lint       # ESLint
+npm run typecheck  # tsc --noEmit over the JavaScript
+npm run check      # lint, types and tests together
+```
+
+Type checking uses TypeScript's `checkJs` over plain JavaScript — no `.ts` files, no build
+step. It reads the JSDoc already in the source and infers the rest, which catches typos,
+wrong argument counts and properties that cannot exist, without asking anyone to annotate a
+codebase that works. `strict` is off on purpose: it would report thousands of "possibly
+undefined" results already guarded a line above, and that noise would bury the real findings.
+
+[`types/express.d.ts`](types/express.d.ts) declares the `req.user` that `attachUser` sets,
+which writes the middleware's contract down somewhere checkable.
+
+Two deliberate gaps. React components are not type-checked yet: a destructured prop reads as
+required, so it needs a JSDoc block per component — annotation work rather than a bug hunt,
+and a permanently red command teaches everyone to ignore it. And seven effects clear state
+before an async fetch or seed a form field from the signed-in user, which `eslint` reports as
+warnings; both cost an extra render pass rather than being wrong.
 
 ## How the product works
 

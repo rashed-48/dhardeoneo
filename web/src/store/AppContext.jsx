@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api, setUnauthorizedHandler } from '../lib/api';
 
@@ -45,20 +45,21 @@ export function AppProvider({ children }) {
    */
   const navigate = useNavigate();
   const location = useLocation();
-  const here = useRef(location);
-  here.current = location;
-
+  // Reading `location` straight from the router rather than mirroring it in a
+  // ref: a ref written during render is not safe under concurrent rendering,
+  // and updating it from an effect would run after the child effects that
+  // trigger the 401, leaving the saved destination one page behind.
   const expireSession = useCallback(() => {
     setSessionExpired(true);
     setUser(null);
 
-    const { pathname, search } = here.current;
+    const { pathname, search } = location;
     // Already on the login screen: keep whichever destination was saved first,
     // or a later stray 401 would make the login screen redirect to itself.
     if (pathname === '/login') return;
 
     navigate('/login', { replace: true, state: { from: pathname + search } });
-  }, [navigate]);
+  }, [navigate, location]);
 
   useEffect(() => {
     setUnauthorizedHandler(expireSession);

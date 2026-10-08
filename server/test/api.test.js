@@ -42,6 +42,10 @@ class Actor {
     this.cookie = '';
   }
 
+  /**
+   * @param {string} route
+   * @param {{ method?: string, body?: unknown }} [options]
+   */
   async call(route, { method = 'GET', body } = {}) {
     const res = await fetch(BASE + '/api' + route, {
       method,
@@ -321,7 +325,6 @@ test('rental requests validate dates and reject impossible ones', async () => {
 
 test('the full rental lifecycle moves money exactly once', async () => {
   const lender = await loginAs('ayesha@shelf.app');
-  const lenderId = (await lender.call('/auth/me')).data.user.id;
 
   const borrower = await loginAs('tanvir@shelf.app');
 
@@ -397,7 +400,6 @@ test('the full rental lifecycle moves money exactly once', async () => {
 
 test('cancelling a paid rental refunds everything and pays out nothing', async () => {
   const lender = await loginAs('ayesha@shelf.app');
-  const lenderId = (await lender.call('/auth/me')).data.user.id;
   const borrower = await loginAs('tanvir@shelf.app');
 
   const listing = await freshListing(lender);
@@ -419,7 +421,6 @@ test('cancelling a paid rental refunds everything and pays out nothing', async (
 
 test('a rental cannot be returned unless it was handed over', async () => {
   const lender = await loginAs('ayesha@shelf.app');
-  const lenderId = (await lender.call('/auth/me')).data.user.id;
   const borrower = await loginAs('tanvir@shelf.app');
 
   const listing = await freshListing(lender);
@@ -440,7 +441,6 @@ test('a rental cannot be returned unless it was handed over', async () => {
 
 test('rental actions are scoped to the people involved', async () => {
   const lender = await loginAs('ayesha@shelf.app');
-  const lenderId = (await lender.call('/auth/me')).data.user.id;
   const borrower = await loginAs('tanvir@shelf.app');
   const stranger = await loginAs('imran@shelf.app');
 

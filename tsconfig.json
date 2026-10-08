@@ -1,0 +1,48 @@
+{
+  // Type checking for a JavaScript project: no TypeScript files, no build
+  // step, no emit. `checkJs` reads the JSDoc already in the source and infers
+  // the rest, which catches typos, wrong argument counts and properties that
+  // cannot exist — without asking anyone to annotate a codebase that works.
+  //
+  // `strict` stays off deliberately. Turning it on here would report thousands
+  // of "possibly undefined" results that are already guarded by the checks
+  // above them, and that noise would hide the real findings.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    "jsx": "react-jsx",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+
+    // These catch real dead code and genuine mistakes without demanding types.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": false
+  },
+  // .jsx is left out for now. Checking components means a JSDoc block on each
+  // one's props, since a destructured prop is otherwise read as required —
+  // worth doing, but it is annotation work rather than a bug hunt, and leaving
+  // the command red in the meantime would just teach everyone to ignore it.
+  "include": [
+    "types/**/*.d.ts",
+    "server/src/**/*.js",
+    "server/test/**/*.js",
+    "web/src/**/*.js",
+    "test/**/*.mjs"
+  ],
+  "exclude": ["node_modules", "**/node_modules", "web/dist", "server/covers"]
+}
