@@ -4,7 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
 import helmet from 'helmet';
-import { db, initDb, DB_DESCRIPTION } from './db.js';
+import { db, initDb, pool, DB_DESCRIPTION } from './db.js';
 import { seed } from './seed.js';
 import { attachUser } from './lib/auth.js';
 import {
@@ -162,9 +162,51 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'Something broke on our side.' });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`[shelf] listening on :${PORT}`);
   console.log(`[shelf] database ${DB_DESCRIPTION}`);
   console.log(`[shelf] covers   ${COVERS_DIR}`);
   console.log(`[shelf] web      ${hasWebBuild ? WEB_DIST : 'served by Vite (dev)'}`);
 });
+
+/**
+ * Hosts send SIGTERM on every deploy and whenever an idle instance is stopped.
+ * Exiting on the spot drops whatever is in flight: Postgres rolls back an
+ * unfinished transaction cleanly, so the ledger stays correct, but someone who
+ * pressed Pay gets a dead connection and no answer about their money.
+ *
+ * So: stop taking new work, let the current requests finish, then close the
+ * pool. Idle keep-alive sockets have to be closed explicitly or they hold the
+ * server open until they time out.
+ */
+const GRACE_MS = Number(process.env.SHELF_SHUTDOWN_GRACE_MS || 10_000);
+let closing = false;
+
+async function shutdown(signal) {
+  if (closing) return;
+  closing = true;
+  console.log(`[shelf] ${signal} — finishing in-flight requests`);
+
+  // A request that never finishes must not block a deploy indefinitely.
+  const giveUp = setTimeout(() => {
+    console.warn(`[shelf] still busy after ${GRACE_MS}ms — exiting anyway`);
+    process.exit(1);
+  }, GRACE_MS);
+  giveUp.unref();
+
+  server.closeIdleConnections();
+  server.close(async () => {
+    try {
+      await pool.end();
+    } catch {
+      /* already gone */
+    }
+    clearTimeout(giveUp);
+    console.log('[shelf] stopped cleanly');
+    process.exit(0);
+  });
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => shutdown(signal));
+}

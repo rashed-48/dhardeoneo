@@ -371,3 +371,24 @@ Eats uses between its UI and its photography.
 - **Deposits are held by the platform** in the ledger and released on return. Damage claims
   (withholding part of a deposit) are not modelled.
 - The JWT secret defaults to a development value; set `SHELF_SECRET` before deploying.
+
+### Where this design stops
+
+Three assumptions hold for one container and would not survive a second one. They are choices
+rather than oversights, and each has an obvious exit:
+
+- **Rate limiting is in-process.** [`lib/rateLimit.js`](server/src/lib/rateLimit.js) counts in
+  a `Map`, so two instances would each allow the full quota. Correct and free for one
+  container; move the counters to Redis or the edge before scaling out.
+- **Cover art is the only local state.** Images fetched after deploy are written to
+  `SHELF_DATA_DIR` and are not shared between instances or kept across a restart without a
+  volume. Anything missing falls back to generated art, which is why losing them degrades the
+  page instead of breaking it. Object storage is the fix if it ever matters.
+- **The schema is created at boot, not migrated.** `initDb()` runs `CREATE TABLE IF NOT
+  EXISTS` and `ADD COLUMN IF NOT EXISTS`, so a new database needs no migration step and an
+  existing one is brought forward. That works while changes are additive; renaming a column,
+  backfilling, or changing a type needs a real migration tool and a deliberate deploy.
+
+Everything else is stateless. The container holds no session store, no cache and no
+database — which is what lets it be stopped at any moment, and why a free instance with no
+disk keeps its data.

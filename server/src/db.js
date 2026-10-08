@@ -328,9 +328,3 @@ export async function initDb() {
   await pool.query(SCHEMA);
 }
 
-/** Kept for symmetry with the old driver; `undefined` never reaches a bind. */
-export function clean(obj) {
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) out[k] = v === undefined ? null : v;
-  return out;
-}
