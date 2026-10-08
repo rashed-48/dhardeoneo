@@ -125,7 +125,7 @@ before(async () => {
         `  docker run -d --rm --name shelf-pg -e POSTGRES_PASSWORD=devpass ` +
         `-e POSTGRES_USER=shelf -e POSTGRES_DB=shelf -p 5433:5432 postgres:17-alpine
 ` +
-        `or set SHELF_TEST_DATABASE_URL. (${error.message})`
+        `or set SHELF_TEST_DATABASE_URL. (${error.code || error.message})`
     );
   }
   await admin.query(`CREATE DATABASE "${TEST_DB}"`);

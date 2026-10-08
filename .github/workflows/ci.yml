@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A run already in flight for the same branch is obsolete once a new commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Both suites create and drop their own database per run, so they only need
+  # a server to connect to.
+  SHELF_TEST_DATABASE_URL: postgres://shelf:devpass@localhost:5432/shelf
+
+jobs:
+  test:
+    name: unit + API
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: shelf
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: shelf
+        ports:
+          - 5432:5432
+        # Without this the steps can start before Postgres accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U shelf -d shelf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      - run: npm ci
+      - run: npm --prefix server ci
+
+      - name: Unit and API tests
+        run: npm test
+
+  browser:
+    name: browser
+    needs: test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: shelf
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: shelf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shelf -d shelf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      - run: npm ci
+      - run: npm --prefix server ci
+      - run: npm --prefix web ci
+
+      # Cover art is fetched rather than committed, and the suite checks that
+      # browse renders it. Open Library is a third party, so a blip here must
+      # not read as a broken build — missing covers fall back to generated art.
+      - name: Fetch cover art
+        run: npm --prefix server run covers -- --seed || echo "cover fetch incomplete"
+
+      # ubuntu-latest ships Chrome; naming it explicitly beats probing for it.
+      - name: Browser tests
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: npm run test:browser

@@ -1,5 +1,7 @@
 # Shelf
 
+[![CI](https://github.com/rashed-48/dhardeoneo/actions/workflows/ci.yml/badge.svg)](https://github.com/rashed-48/dhardeoneo/actions/workflows/ci.yml)
+
 A peer-to-peer book lending marketplace. People list books they own with a **price per day**,
 and borrowers nearby find them, **compare on price, rating and distance**, request the book
 for a set number of days, pay once the lender accepts, collect it in person, return it, and
@@ -82,6 +84,12 @@ throughput.
 Login also hashes against a dummy value when the email is unknown, so a missing account costs
 the same work as a wrong password and response time cannot be used to enumerate registered
 emails.
+
+Both suites run on every push and pull request via
+[GitHub Actions](.github/workflows/ci.yml): one job for the unit and API tests against a
+Postgres service container, a second for the browser suite. The browser job fetches cover art
+first, since it is not committed, and tolerates a bad day at Open Library rather than
+reporting a broken build.
 
 Not yet present: linting and type checking.
 
