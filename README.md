@@ -2,6 +2,12 @@
 
 [![CI](https://github.com/rashed-48/dhardeoneo/actions/workflows/ci.yml/badge.svg)](https://github.com/rashed-48/dhardeoneo/actions/workflows/ci.yml)
 
+**[Live demo →](https://shelf-he9s.onrender.com)**  ·  sign in as `ayesha@shelf.app` / `password123`
+
+> Running on a free instance that sleeps after 15 minutes idle, so the first request may take
+> up to a minute to wake it. Payments are simulated — see [Payments](#payments). Every seeded
+> account shares that password, so treat the demo as public.
+
 A peer-to-peer book lending marketplace. People list books they own with a **price per day**,
 and borrowers nearby find them, **compare on price, rating and distance**, request the book
 for a set number of days, pay once the lender accepts, collect it in person, return it, and
